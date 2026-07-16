@@ -1,0 +1,7 @@
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local-only fixture used for the live Codex smoke test.
+fixtures/live_codex_smoke/
