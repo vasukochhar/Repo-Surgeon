@@ -20,6 +20,7 @@ class Orchestrator:
         job = self.store.get(job_id)
         if not job:
             raise KeyError(job_id)
+        owned_workspace = workdir is None
         try:
             workdir = workdir or await self.sandbox.clone(job.repo_url)
             job.profile = await self._stage(job, JobState.SCOUTING, lambda: self.scout.profile(workdir))
@@ -35,6 +36,21 @@ class Orchestrator:
         except Exception as error:
             job.state, job.error = JobState.FAILED, str(error)
             await self._emit(job, "failed", {"error": job.error})
+        finally:
+            cleanup_profile = getattr(self.scout, "cleanup_profile", None)
+            if cleanup_profile and workdir is not None:
+                try:
+                    await cleanup_profile(workdir)
+                except Exception as cleanup_error:
+                    if job.error is None:
+                        job.state, job.error = JobState.FAILED, f"profile cleanup failed: {cleanup_error}"
+            cleanup = getattr(self.sandbox, "cleanup", None)
+            if owned_workspace and cleanup and workdir is not None:
+                try:
+                    await cleanup(workdir)
+                except Exception as cleanup_error:
+                    if job.error is None:
+                        job.state, job.error = JobState.FAILED, f"workspace cleanup failed: {cleanup_error}"
         return job
 
     async def _operate(self, job: Job, workdir: Path, changes) -> None:

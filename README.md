@@ -151,3 +151,34 @@ It uses `REPO_SURGEON_MODEL` when set, otherwise `gpt-5.6`. The OpenAI key must 
 - Surgeon retry behavior: verified for fail-then-pass and five-iteration `needs_human` paths.
 - FastAPI job creation/status: smoke-tested.
 - Real `codex exec`: smoke-tested with a writable sandbox and a captured Git patch.
+
+## Faiz services and real mode
+
+Faiz's production Sandbox, Scout, security, and Verifier services integrate through Vasu's existing protocols. The default remains safe mock mode. Set `REPO_SURGEON_MODE=real` to construct the real services; imports never start Docker or scanners.
+
+```text
+RealSandbox -> RealScout -> RepoProfile -> Surgeon edits
+                                      -> affected-test hook -> RealVerifier -> mutation score
+```
+
+Build and run the isolated runtimes with:
+
+```powershell
+docker build -t repo-surgeon-python -f docker/python/Dockerfile .
+docker build -t repo-surgeon-node -f docker/node/Dockerfile .
+$env:REPO_SURGEON_MODE = "real"
+python -m uvicorn repo_surgeon.app:app
+```
+
+Real mode expects Docker and Git. OSV-Scanner, pip-audit, mutmut, npm audit, and project-local Stryker are classified as unavailable when absent. Sandbox execution applies memory, CPU, PID, capability, privilege, mount, timeout, and phase-based network controls. Dependency installation may use the network; execution defaults to no network. Hostname allow-list enforcement requires an external proxy and is not provided by native Docker bridge mode. Host execution is disabled unless explicitly enabled for development.
+
+Scout detects Python and JavaScript/TypeScript manifests, lockfiles, package managers, commands, and root workspaces. It captures baseline failures, dependency trees, coverage JSON, and normalized scanner findings. A deterministic `repo_profile.json` is written in the Repo Surgeon temporary output directory, outside the inspected repository. Its main fields include `schema_version`, `repository`, `stack`, `commands`, `baseline`, `coverage_result`, `dependencies`, and `security_report`.
+
+Verifier loads the workspace-scoped profile, runs affected tests before the original full suite/build, and treats only new failures or a build regression as fatal. Targeted mutmut or project-local Stryker runs occur only when tests changed and are non-fatal when unavailable. Quality scoring reweights mutation, changed-code coverage, and stability when inputs are absent.
+
+Current limits: Python and JavaScript/TypeScript only; root-level monorepo commands only; phase-based rather than hostname-based network rules; external scanner availability varies; mutation testing is targeted and capped.
+
+```powershell
+python -m pytest -q
+python -m compileall repo_surgeon
+```
