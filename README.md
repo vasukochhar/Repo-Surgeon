@@ -1,22 +1,30 @@
-# Repo Surgeon - Orchestrator & Agent Pipeline
+# Repo Surgeon
 
-Repo Surgeon is an autonomous codebase-modernization pipeline for OpenAI Build Week 2026. This repository currently contains **Vasu's component**: the mock-first orchestrator and Surgeon execution pipeline.
+Repo Surgeon is an autonomous codebase-modernization pipeline built for OpenAI Build Week 2026. Point it at a repo and it establishes a test baseline, researches real breaking changes, executes dependency upgrades and security fixes inside a sandbox, proves its own generated tests actually catch bugs, and opens small, risk-graded pull requests — unattended.
 
-It can run an unattended upgrade job end to end today using mocks, emit progress events for a dashboard, and use the local Codex CLI to make focused real edits when enabled.
+## Status
 
-## Scope and ownership
+| Component | Owner | Status |
+| --- | --- | --- |
+| Orchestrator, job state machine, Surgeon self-correction loop, Codex runner, FastAPI/SSE endpoints | Vasu | Done |
+| Sandbox, Scout (stack detection, baseline, coverage), security scanners, Verifier (baseline diff, affected tests, mutation testing) | Faiz | Done |
+| Dashboard (Next.js) | Anubhav | Done |
+| Real Researcher, real Reviewer/PR creation, CI watcher | Mayank | Pending — mocked today |
 
-Vasu owns:
+The pipeline runs end to end today using mocks for the pending pieces, so the dashboard, orchestrator, and real Sandbox/Scout/Verifier can all be exercised now without waiting on the rest.
 
-- Shared Pydantic JSON contracts
-- Stage interfaces and mock implementations
-- The job state machine and in-memory job store
-- Upgrade planning and deterministic risk ordering
-- The Surgeon self-correction loop, capped at five attempts
-- The Codex CLI runner
-- FastAPI job and SSE endpoints
+## What it does once every piece is real
 
-The real Sandbox/Scout/Verifier services are owned by Faiz. The real Researcher, Reviewer, PR, and CI-watcher integrations are owned by Mayank. The dashboard is owned by Anubhav.
+1. **Submit.** A user pastes a repo URL into the dashboard.
+2. **Scout** (Faiz, real) clones the repo into a Docker sandbox, detects the stack, runs the existing test suite/build for a baseline, and scans dependencies with OSV-Scanner/pip-audit/npm audit.
+3. **Researcher** (Mayank, still mocked) asks GPT-5.6 with web search to fetch the real changelog, migration guide, and known issues for every outdated or vulnerable dependency.
+4. **Planner** (Vasu, real) turns the profile and breaking-change map into a risk-ordered upgrade plan: security fixes first, then patch, minor, major.
+5. **Surgeon** (Vasu + Faiz, real) runs Codex headless per item with the breaking-change context injected, then Faiz's Verifier re-runs affected and full tests, diffs against baseline, and feeds failures back to Codex (capped at 5 attempts before flagging `needs_human`). It also mutation-tests any new/changed tests to score how many injected bugs they actually catch.
+6. **Reviewer** (Mayank, still mocked) splits green items into small PRs ordered by risk, each with an explanation, evidence links, test/mutation scores, a confidence grade, and a rollback note.
+7. **CI watcher** (Mayank, still mocked) polls each PR's checks; on failure it pulls the logs, feeds them back to the Surgeon, and pushes a fix commit — repeating until CI passes.
+8. **Dashboard** (Anubhav, real) shows all of this live: a pipeline stepper, the scout report, the upgrade plan, per-item attempt/score cards with a diff viewer, and the resulting PR links.
+
+Once Mayank's Researcher/Reviewer/CI-watcher land, steps 3, 6, and 7 switch from mock data to real GPT research and real GitHub PRs — nothing else in the pipeline or dashboard needs to change, since they were built against the same contracts the mocks already satisfy.
 
 ## Pipeline
 
@@ -49,8 +57,14 @@ repo_surgeon/
   events.py         Async event bus used by SSE
   jobstore.py       In-memory job registry
   app.py            FastAPI application
-  mocks/            Mock Scout, Researcher, Verifier, Reviewer, Sandbox
-tests/              Orchestrator, planner, and Surgeon tests
+  mocks/            Mock Researcher, Reviewer (Scout/Sandbox/Verifier mocks retained for tests)
+  sandbox/          Docker sandbox manager, command runner, network policy
+  scout/            Stack detection, baseline runner, coverage, dependency collection
+  security/         OSV-Scanner / pip-audit / npm audit parsing and normalization
+  verifier/         Regression-aware verification, affected tests, mutation testing, quality score
+dashboard/          Next.js dashboard (submit a repo, watch the live pipeline, view diffs/PRs/scores)
+docs/               Implementation plans
+tests/              Backend test suite (pytest)
 ```
 
 ## Setup
@@ -58,10 +72,11 @@ tests/              Orchestrator, planner, and Surgeon tests
 Prerequisites:
 
 - Python 3.12+
-- Node.js/npm (only needed to install the Codex CLI)
+- Node.js/npm (dashboard, and to install the Codex CLI)
 - Git
+- Docker (only needed for real-mode sandbox execution)
 
-Install the project:
+Install the backend:
 
 ```powershell
 py -m pip install -e ".[dev]"
@@ -74,7 +89,7 @@ $py = "C:\Users\MSI1\.cache\codex-runtimes\codex-primary-runtime\dependencies\py
 & $py -m pip install -e ".[dev]"
 ```
 
-Run tests:
+Run the backend tests:
 
 ```powershell
 & $py -m pytest -q
@@ -101,12 +116,25 @@ Invoke-RestMethod "http://127.0.0.1:8000/jobs/$($job.job_id)"
 
 The default application uses mocks, so this demo does not call OpenAI or modify a repository.
 
+## Dashboard
+
+The dashboard lives in [`dashboard/`](dashboard) (Next.js 16 + Tailwind). It proxies every API call through `/api/backend/*` to the FastAPI backend, so no CORS configuration is needed.
+
+```powershell
+cd dashboard
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000` with the backend running on `:8000` (set `BACKEND_URL` in `dashboard/.env.local` to point elsewhere). Submitting a repo URL creates a job and opens its live page: a pipeline stepper, the scout report, the upgrade plan, per-item cards with live test counts and a diff viewer, mutation/test-quality scores (populated in real mode; mock mode shows placeholders), and PR links — mock PRs are labeled as such until Mayank's Reviewer replaces them. See [`docs/DASHBOARD_IMPLEMENTATION_PLAN.md`](docs/DASHBOARD_IMPLEMENTATION_PLAN.md) for the full design.
+
 ## API
 
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /jobs` | Create and asynchronously run a job. Body: `{ "repo_url": "..." }`. |
-| `GET /jobs/{job_id}` | Read the current state, results, PRs, and error, if any. |
+| `GET /jobs` | List all jobs (id, repo URL, state, error). |
+| `GET /jobs/{job_id}` | Read the current state, results, PRs, error, repo profile, and upgrade plan. |
 | `GET /jobs/{job_id}/events` | Server-sent event stream for the dashboard. |
 
 ## Live Codex runner
@@ -137,20 +165,11 @@ planner = Planner.from_openai()
 
 It uses `REPO_SURGEON_MODEL` when set, otherwise `gpt-5.6`. The OpenAI key must be available as `OPENAI_API_KEY`.
 
-## Still pending - teammate and final integration work
+## Still pending
 
-1. Replace mock `Sandbox`, `Scout`, `Verifier`, `Researcher`, and `Reviewer` implementations with the teammates' real services.
-2. Agree and freeze [`contracts.py`](repo_surgeon/contracts.py) with Faiz and Mayank. This is the source of truth for every integration seam.
-3. Connect Anubhav's dashboard to `GET /jobs/{job_id}/events` for live SSE progress updates.
-4. Use the live GPT planner when real API-backed upgrade plans are desired instead of the mock fallback behavior.
-5. Add Mayank's CI watcher through the existing `WATCHING_CI` hook.
-
-## Current verification status
-
-- Mock pipeline: verified from `QUEUED` to `DONE`.
-- Surgeon retry behavior: verified for fail-then-pass and five-iteration `needs_human` paths.
-- FastAPI job creation/status: smoke-tested.
-- Real `codex exec`: smoke-tested with a writable sandbox and a captured Git patch.
+1. Replace mock `Researcher` and `Reviewer` (real PR creation) with Mayank's implementations, and wire in the CI watcher through the existing `WATCHING_CI` hook.
+2. Use the live GPT planner when real API-backed upgrade plans are desired instead of the mock fallback behavior.
+3. Dashboard UI/UX polish — the current dashboard is functionally complete (every pipeline stage, score, diff, and PR is wired up and live) but intentionally plain; visual design is open for a follow-up pass.
 
 ## Faiz services and real mode
 
@@ -182,3 +201,9 @@ Current limits: Python and JavaScript/TypeScript only; root-level monorepo comma
 python -m pytest -q
 python -m compileall repo_surgeon
 ```
+
+## Current verification status
+
+- Backend: 46/46 tests pass (`python -m pytest -q`), covering the mock pipeline end to end (`QUEUED` → `DONE`), Surgeon retry behavior (fail-then-pass and five-iteration `needs_human` paths), and the job-list/profile/plan API additions.
+- Real `codex exec`: smoke-tested with a writable sandbox and a captured Git patch.
+- Dashboard: manually verified end to end against the mock pipeline — live stepper, scores, diff viewer, and PR panel render correctly; a stale job ID after a backend restart shows a friendly "not found" page instead of crashing; two concurrent jobs in separate tabs don't cross-contaminate events; `npm run build` and `npm run lint` both pass clean.
