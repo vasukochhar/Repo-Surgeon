@@ -47,11 +47,18 @@ async def create_job(request: CreateJob) -> dict[str, str]:
     job = store.create(request.repo_url); asyncio.create_task(orchestrator.run(job.id)); return {"job_id": job.id}
 
 
+@app.get("/jobs")
+async def list_jobs() -> list[dict]:
+    return [{"id": j.id, "repo_url": j.repo_url, "state": j.state, "error": j.error} for j in store.list()]
+
+
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str) -> dict:
     job = store.get(job_id)
     if not job: raise HTTPException(404, "Job not found")
-    return {"id": job.id, "repo_url": job.repo_url, "state": job.state, "results": job.results, "prs": job.prs, "error": job.error}
+    return {"id": job.id, "repo_url": job.repo_url, "state": job.state, "results": job.results, "prs": job.prs,
+            "error": job.error, "profile": job.profile.model_dump(mode="json") if job.profile else None,
+            "plan": job.plan.model_dump(mode="json") if job.plan else None}
 
 
 @app.get("/jobs/{job_id}/events")

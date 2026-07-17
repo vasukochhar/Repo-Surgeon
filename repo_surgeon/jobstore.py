@@ -43,3 +43,6 @@ class InMemoryJobStore:
 
     def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
+
+    def list(self) -> list[Job]:
+        return list(self._jobs.values())
