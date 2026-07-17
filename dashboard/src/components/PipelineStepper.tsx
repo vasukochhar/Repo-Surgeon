@@ -13,13 +13,6 @@ function stepStatus(stage: JobState, events: PipelineEvent[], jobState: JobState
   return "pending";
 }
 
-const DOT_STYLES: Record<StepStatus, string> = {
-  pending: "bg-neutral-800 text-neutral-500 ring-1 ring-neutral-700",
-  active: "bg-blue-600 text-white ring-4 ring-blue-500/30 animate-pulse",
-  complete: "bg-emerald-600 text-white",
-  failed: "bg-red-600 text-white",
-};
-
 const LABELS: Record<JobState, string> = {
   queued: "Queued",
   scouting: "Scout",
@@ -33,6 +26,56 @@ const LABELS: Record<JobState, string> = {
   failed: "Failed",
 };
 
+function StepNode({ status, index }: { status: StepStatus; index: number }) {
+  if (status === "complete") {
+    return (
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--ok)] text-[#04150a]">
+        <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none">
+          <path
+            d="M3.5 8.5L6.5 11.5L12.5 4.5"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            pathLength={1}
+            style={{
+              strokeDasharray: 1,
+              strokeDashoffset: 0,
+              transition: "stroke-dashoffset 320ms var(--ease-out)",
+            }}
+          />
+        </svg>
+      </div>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--danger)] text-xs font-semibold text-white">
+        ✕
+      </div>
+    );
+  }
+  if (status === "active") {
+    return (
+      <div className="dot-live flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-[#04150f]">
+        {index + 1}
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-[var(--text-faint)] ring-1 ring-inset ring-[var(--border-strong)]">
+      {index + 1}
+    </div>
+  );
+}
+
+function Connector({ complete, active, vertical }: { complete: boolean; active: boolean; vertical?: boolean }) {
+  const base = vertical ? "w-0.5" : "mx-1 h-0.5 w-8 shrink-0 sm:w-12";
+  if (complete) return <div className={`${base} bg-[var(--ok)]`} style={vertical ? { height: 16 } : undefined} />;
+  if (active) return <div className={`connector-active ${base}`} style={vertical ? { height: 16 } : undefined} />;
+  return <div className={`${base} bg-[var(--border)]`} style={vertical ? { height: 16 } : undefined} />;
+}
+
 export function PipelineStepper({ jobState, events }: { jobState: JobState; events: PipelineEvent[] }) {
   return (
     <>
@@ -45,14 +88,18 @@ export function PipelineStepper({ jobState, events }: { jobState: JobState; even
           return (
             <div key={stage} className="flex items-center gap-3">
               <div className="flex flex-col items-center">
-                <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${DOT_STYLES[status]}`}>
-                  {status === "complete" ? "✓" : index + 1}
-                </div>
-                {!isLast && <div className={`h-4 w-0.5 ${status === "complete" ? "bg-emerald-600" : "bg-neutral-800"}`} />}
+                <StepNode status={status} index={index} />
+                {!isLast && (
+                  <Connector
+                    vertical
+                    complete={status === "complete"}
+                    active={status === "active"}
+                  />
+                )}
               </div>
-              <span className="text-sm text-neutral-300">
+              <span className="text-sm text-[var(--text-muted)]">
                 {LABELS[stage]}
-                {needsHumanFlag && <span className="ml-2 text-xs text-amber-400">⚑ needs human</span>}
+                {needsHumanFlag && <span className="ml-2 text-xs text-[var(--warn)]">⚑ needs human</span>}
               </span>
             </div>
           );
@@ -67,14 +114,20 @@ export function PipelineStepper({ jobState, events }: { jobState: JobState; even
           const needsHumanFlag = isLast && jobState === "needs_human";
           return (
             <div key={stage} className="flex items-center">
-              <div className="flex flex-col items-center gap-1">
-                <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${DOT_STYLES[status]}`}>
-                  {status === "complete" ? "✓" : index + 1}
-                </div>
-                <span className="whitespace-nowrap text-[11px] text-neutral-400">{LABELS[stage]}</span>
-                {needsHumanFlag && <span className="text-[11px] text-amber-400">⚑ needs human</span>}
+              <div className="flex flex-col items-center gap-1.5">
+                <StepNode status={status} index={index} />
+                <span
+                  className={`whitespace-nowrap text-[11px] ${
+                    status === "active" ? "font-medium text-[var(--accent-bright)]" : "text-[var(--text-faint)]"
+                  }`}
+                >
+                  {LABELS[stage]}
+                </span>
+                {needsHumanFlag && <span className="text-[11px] text-[var(--warn)]">⚑ needs human</span>}
               </div>
-              {!isLast && <div className={`mx-1 h-0.5 w-8 shrink-0 sm:w-12 ${status === "complete" ? "bg-emerald-600" : "bg-neutral-800"}`} />}
+              {!isLast && (
+                <Connector complete={status === "complete"} active={status === "active"} />
+              )}
             </div>
           );
         })}

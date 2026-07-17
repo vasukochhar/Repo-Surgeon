@@ -1,10 +1,11 @@
 import type { PRResult } from "@/lib/types";
+import { GlowCard } from "@/components/ui/GlowCard";
 
 export function PRPanel({ prs }: { prs: PRResult[] }) {
   if (prs.length === 0) return null;
   return (
-    <div className="rounded-xl border border-neutral-800 bg-neutral-900/60 p-5">
-      <h3 className="mb-3 text-sm font-medium uppercase tracking-wide text-neutral-500">Pull requests</h3>
+    <GlowCard className="p-5">
+      <h3 className="eyebrow mb-3">Pull requests</h3>
       <ul className="space-y-2">
         {prs.map((pr) => {
           const isMock = (() => {
@@ -15,25 +16,37 @@ export function PRPanel({ prs }: { prs: PRResult[] }) {
             }
           })();
           return (
-            <li key={pr.url} className="flex flex-wrap items-center gap-2 text-sm">
+            <li key={pr.url}>
               <a
                 href={pr.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="font-mono text-blue-400 hover:text-blue-300 hover:underline"
+                className="group flex items-center justify-between gap-3 rounded-[var(--radius-md)] bg-[var(--surface-2)] px-4 py-3 text-sm transition-colors duration-[var(--dur-fast)] hover:bg-[var(--surface-2)]/70"
               >
-                {pr.url}
-              </a>
-              {isMock && (
-                <span className="rounded-full bg-neutral-700 px-2 py-0.5 text-[11px] text-neutral-300">
-                  mock PR (GitHub layer pending)
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-mono text-xs text-[var(--accent-bright)] group-hover:text-[var(--accent)]">
+                    {pr.url}
+                  </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    {isMock && (
+                      <span className="rounded-full bg-[var(--surface-1)] px-2 py-0.5 text-[11px] text-[var(--text-faint)]">
+                        mock PR (GitHub layer pending)
+                      </span>
+                    )}
+                    <span className="text-xs text-[var(--text-faint)]">covers {pr.item_ids.length} item(s)</span>
+                  </div>
+                </div>
+                <span
+                  aria-hidden="true"
+                  className="text-[var(--text-faint)] transition-transform duration-[var(--dur-fast)] group-hover:translate-x-1 group-hover:text-[var(--accent)]"
+                >
+                  →
                 </span>
-              )}
-              <span className="text-xs text-neutral-500">covers {pr.item_ids.length} item(s)</span>
+              </a>
             </li>
           );
         })}
       </ul>
-    </div>
+    </GlowCard>
   );
 }

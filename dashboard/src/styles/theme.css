@@ -1,0 +1,136 @@
+/*
+ * Repo Surgeon — "Operating Theater" design tokens
+ * -------------------------------------------------
+ * NOT yet wired in. To adopt: `@import "../styles/theme.css";` from
+ * globals.css (after the tailwind import) and delete the old :root block.
+ *
+ * Concept: a lights-off operating theater. Cold near-black grounds,
+ * scrub-teal accent (the optical complement of blood red — which is why
+ * surgeons wear it), red reserved exclusively for failure states.
+ */
+
+:root {
+  /* Grounds — blue-cold bias, never pure grey */
+  --bg: #06080c;
+  --surface-1: #0b0f16;
+  --surface-2: #111826;
+  --surface-glass: rgba(13, 18, 28, 0.72);
+
+  /* Lines */
+  --border: #1a2231;
+  --border-strong: #263145;
+
+  /* Ink */
+  --text: #e8edf5;
+  --text-muted: #96a0b5;
+  --text-faint: #5b6478;
+
+  /* Accent — scrub teal. One accent, spent deliberately. */
+  --accent: #2de0bf;
+  --accent-bright: #8cf5e0;
+  --accent-dim: rgba(45, 224, 191, 0.14);
+
+  /* Semantic — separate from the accent */
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --danger: #ff6b6b;
+  --info: #6aa6ff;
+
+  /* Elevation & glow */
+  --glow-accent: 0 0 0 1px rgba(45, 224, 191, 0.25), 0 0 28px rgba(45, 224, 191, 0.12);
+  --shadow-lift: 0 8px 32px rgba(0, 0, 0, 0.45);
+
+  /* Shape */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --dur-fast: 150ms;
+  --dur-base: 240ms;
+  --dur-slow: 420ms;
+  --dur-entrance: 600ms;
+
+  /* Back-compat with the existing @theme mapping in globals.css */
+  --background: var(--bg);
+  --foreground: var(--text);
+}
+
+/* ---------- Keyframes ---------- */
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+
+@keyframes pulse-ring {
+  0%   { box-shadow: 0 0 0 0 var(--accent-dim); }
+  70%  { box-shadow: 0 0 0 8px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
+}
+
+/* ---------- Utilities ---------- */
+
+/* Section label in the instrument-readout voice: SCOUT REPORT, OPERATIONS… */
+.eyebrow {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* Standard elevated panel */
+.panel {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  transition: border-color var(--dur-base) var(--ease-out),
+              box-shadow var(--dur-base) var(--ease-out),
+              transform var(--dur-base) var(--ease-out);
+}
+.panel-interactive:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-lift);
+  transform: translateY(-2px);
+}
+
+/* Staggered entrance — set --i per child (or use staggerDelay from lib/motion) */
+.rise-in {
+  animation: rise var(--dur-entrance) var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 60ms);
+}
+
+/* Animated sheen along an active pipeline connector */
+.connector-active {
+  background: linear-gradient(90deg,
+    var(--border) 25%, var(--accent) 50%, var(--border) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+/* Live status dot */
+.dot-live {
+  background: var(--accent);
+  border-radius: 9999px;
+  animation: pulse-ring 1.8s var(--ease-out) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise-in { animation: none; }
+  .connector-active { animation: none; background: var(--accent); }
+  .dot-live { animation: none; }
+  .panel, .panel-interactive:hover { transition: none; transform: none; }
+}

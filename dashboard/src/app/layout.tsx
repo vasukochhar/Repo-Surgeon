@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import Link from "next/link";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -30,7 +31,20 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
     >
-      <body className="min-h-full flex flex-col bg-background text-foreground">{children}</body>
+      <body className="min-h-full flex flex-col bg-background text-foreground">
+        <header className="sticky top-0 z-40 border-b border-[var(--border)] bg-[var(--surface-glass)] backdrop-blur-md">
+          <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-6 py-3">
+            <Link href="/" className="flex items-center gap-2.5">
+              <span aria-hidden="true" className="dot-live h-2 w-2 shrink-0" />
+              <span className="font-mono text-sm font-medium tracking-tight text-[var(--text)]">
+                REPO SURGEON
+              </span>
+            </Link>
+            <span className="eyebrow hidden sm:inline">Autonomous codebase surgery</span>
+          </div>
+        </header>
+        <div className="rise-in flex flex-1 flex-col">{children}</div>
+      </body>
     </html>
   );
 }
