@@ -170,7 +170,18 @@ It uses `REPO_SURGEON_MODEL` when set, otherwise `gpt-5.6`. The OpenAI key must 
 
 ## Real-mode credentials and safety
 
-Set `REPO_SURGEON_MODE=real`, `OPENAI_API_KEY`, and `GITHUB_TOKEN` before starting the API. The GitHub token needs repository contents and pull-request read/write access; Actions/check-run read access is needed for CI watching. `GITHUB_TOKEN` is not required to construct the application, but jobs cannot open or watch live PRs without it.
+Copy [`.env.example`](.env.example) to `.env`, then set `REPO_SURGEON_MODE=real`, `OPENAI_API_KEY`, and `GITHUB_TOKEN`. The GitHub token needs repository contents and pull-request read/write access; Actions/check-run read access is needed for CI watching. `GITHUB_TOKEN` is not required to construct the application, but jobs cannot open or watch live PRs without it.
+
+The Python application reads standard environment variables; load the local `.env` file into your shell before starting it:
+
+```bash
+cp .env.example .env
+# Edit .env with your credentials, then:
+set -a && source .env && set +a
+.venv/bin/python -m uvicorn repo_surgeon.app:app --host 127.0.0.1 --port 8000
+```
+
+On PowerShell, set the same values with `$env:VARIABLE = "value"` before running Uvicorn. `.env` is ignored by Git, so credentials are not committed.
 
 Real mode is deliberately opt-in: it creates remote branches and pull requests only for the repository URL submitted to that job. The reviewer creates one branch per green upgrade, and the CI repair loop is capped at two fix commits per PR; a persistent failure is reported as `needs_human` rather than silently retried forever.
 
