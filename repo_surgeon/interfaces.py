@@ -29,6 +29,10 @@ class ReviewerService(Protocol):
     async def open_prs(self, request: PRRequest) -> list[PRResult]: ...
 
 
+class CIWatcherService(Protocol):
+    async def watch(self, prs: list[PRResult], workdir: Path) -> list[PRResult]: ...
+
+
 class CodexRunner(Protocol):
     async def edit(self, workdir: Path, item: UpgradeItem, breaking_change: ChangeDetail | None,
                    failure_context: str | None = None) -> EditResult: ...

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import timezone, datetime
 from enum import Enum
 from typing import Any
 
@@ -155,7 +155,7 @@ class RepoProfile(BaseModel):
     security_report: SecurityReport = Field(default_factory=SecurityReport)
     raw_scanner_results: dict[str, Any] = Field(default_factory=dict)
     sandbox_metadata: dict[str, Any] = Field(default_factory=dict)
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     profile_path: str | None = None
 
 
@@ -165,6 +165,7 @@ class ChangeDetail(BaseModel):
     changelog_url: str | None = None
     migration_notes: str = ""
     known_issues: list[str] = Field(default_factory=list)
+    sources: list[str] = Field(default_factory=list)
 
 
 class BreakingChanges(BaseModel):
@@ -245,22 +246,32 @@ class SurgeonResult(BaseModel):
     iterations: int
     files_changed: list[str] = Field(default_factory=list)
     patch: str = ""
+    verification: VerifyResult | None = None
 
 
 class PRRequest(BaseModel):
     items: list[UpgradeItem]
     branch: str
     evidence: list[SurgeonResult]
+    repo_url: str | None = None
+    workdir: str | None = None
+    base_branch: str | None = None
 
 
 class PRResult(BaseModel):
     url: str
     item_ids: list[str] = Field(default_factory=list)
+    number: int | None = None
+    branch: str | None = None
+    head_sha: str | None = None
+    ci_status: str | None = None
+    ci_logs: str | None = None
+    repository: str | None = None
 
 
 class Event(BaseModel):
     job_id: str
     stage: str
     type: str
-    ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     payload: dict[str, Any] = Field(default_factory=dict)

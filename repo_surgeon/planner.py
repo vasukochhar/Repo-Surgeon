@@ -17,11 +17,14 @@ class Planner:
     @classmethod
     def from_openai(cls, model: str | None = None) -> "Planner":
         """Create the production planner; keep the default constructor mock-first."""
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI()
         selected_model = model or os.environ.get("REPO_SURGEON_MODEL", "gpt-5.6")
+        client = None
 
         async def respond(prompt: str) -> str:
+            nonlocal client
+            if client is None:
+                from openai import AsyncOpenAI
+                client = AsyncOpenAI()
             response = await client.responses.create(model=selected_model, input=prompt)
             return response.output_text
         return cls(respond)

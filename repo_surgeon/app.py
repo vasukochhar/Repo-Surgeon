@@ -6,11 +6,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from .codex_runner import MockCodexRunner, RealCodexRunner
+from .ci import live_ci_watcher
 from .events import EventBus
 from .jobstore import InMemoryJobStore
 from .mocks import MockResearcher, MockReviewer, MockSandbox, MockScout, MockVerifier
 from .orchestrator import Orchestrator
 from .planner import Planner
+from .github_layer import GitHubClient, GitHubReviewer
+from .researcher import OpenAIResearcher
 from .sandbox import AsyncCommandRunner, RealSandbox, SandboxedCommandRunner
 from .scout import ProfileRegistry, RealScout
 from .surgeon import Surgeon
@@ -23,15 +26,19 @@ def build_orchestrator(mode: str | None = None, store: InMemoryJobStore | None =
     store, events = store or InMemoryJobStore(), events or EventBus()
     if mode == "mock":
         sandbox, scout, verifier, codex = MockSandbox(), MockScout(), MockVerifier(), MockCodexRunner()
+        researcher, planner, reviewer, ci_watcher = MockResearcher(), Planner(), MockReviewer(), None
     elif mode == "real":
         host_runner, registry = AsyncCommandRunner(), ProfileRegistry()
         sandbox = RealSandbox(runner=host_runner)
         runner = SandboxedCommandRunner(sandbox)
         scout, verifier, codex = RealScout(runner, registry), RealVerifier(registry, runner), RealCodexRunner()
+        token = os.getenv("GITHUB_TOKEN")
+        researcher, planner = OpenAIResearcher.from_openai(), Planner.from_openai()
+        reviewer, ci_watcher = GitHubReviewer(GitHubClient(token)), live_ci_watcher(token)
     else:
         raise ValueError("REPO_SURGEON_MODE must be 'mock' or 'real'")
-    return Orchestrator(store, events, sandbox, scout, MockResearcher(), Planner(),
-        Surgeon(codex, verifier, events), MockReviewer())
+    return Orchestrator(store, events, sandbox, scout, researcher, planner,
+        Surgeon(codex, verifier, events), reviewer, ci_watcher)
 
 
 app = FastAPI(title="Repo Surgeon")

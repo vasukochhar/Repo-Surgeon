@@ -5,3 +5,4 @@ __pycache__/
 
 # Local-only fixture used for the live Codex smoke test.
 fixtures/live_codex_smoke/
+.venv/

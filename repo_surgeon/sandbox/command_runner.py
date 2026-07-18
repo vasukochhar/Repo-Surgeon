@@ -28,13 +28,14 @@ class AsyncCommandRunner:
                 *command, cwd=str(cwd) if cwd else None, env=merged,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
+            communicate = asyncio.create_task(process.communicate())
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(
-                    process.communicate(), timeout=timeout or self.default_timeout
+                    asyncio.shield(communicate), timeout=timeout or self.default_timeout
                 )
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 process.kill()
-                stdout_b, stderr_b = await process.communicate()
+                stdout_b, stderr_b = await communicate
                 return self._result(command, cwd, None, stdout_b, stderr_b, started,
                                     ExecutionStatus.TIMEOUT, timed_out=True)
         except asyncio.CancelledError:

@@ -57,6 +57,10 @@ class RealCodexRunner:
         return [executable, "exec", "--sandbox", self.sandbox, prompt]
 
     async def _diff(self, workdir: Path) -> str:
+        # Intent-to-add makes untracked files visible in the patch without
+        # staging their content, so a reviewer can reproduce a full migration.
+        await asyncio.to_thread(subprocess.run, ["git", "add", "-N", "."], cwd=workdir,
+                                check=True, capture_output=True, text=True)
         result = await asyncio.to_thread(subprocess.run, ["git", "diff", "--binary"], cwd=workdir,
             check=True, capture_output=True, text=True)
         return result.stdout

@@ -9,22 +9,22 @@ Repo Surgeon is an autonomous codebase-modernization pipeline built for OpenAI B
 | Orchestrator, job state machine, Surgeon self-correction loop, Codex runner, FastAPI/SSE endpoints | Vasu | Done |
 | Sandbox, Scout (stack detection, baseline, coverage), security scanners, Verifier (baseline diff, affected tests, mutation testing) | Faiz | Done |
 | Dashboard (Next.js) | Anubhav | Done |
-| Real Researcher, real Reviewer/PR creation, CI watcher | Mayank | Pending — mocked today |
+| Evidence-backed Researcher, GitHub Reviewer/PR creation, CI watcher + bounded repair loop | Mayank | Done — enabled in real mode; demo forks need selected targets |
 
-The pipeline runs end to end today using mocks for the pending pieces, so the dashboard, orchestrator, and real Sandbox/Scout/Verifier can all be exercised now without waiting on the rest.
+The pipeline runs end to end in mock mode by default. Real mode enables each production stage when its required credentials and local tools are available.
 
 ## What it does once every piece is real
 
 1. **Submit.** A user pastes a repo URL into the dashboard.
 2. **Scout** (Faiz, real) clones the repo into a Docker sandbox, detects the stack, runs the existing test suite/build for a baseline, and scans dependencies with OSV-Scanner/pip-audit/npm audit.
-3. **Researcher** (Mayank, still mocked) asks GPT-5.6 with web search to fetch the real changelog, migration guide, and known issues for every outdated or vulnerable dependency.
+3. **Researcher** (Mayank) asks GPT-5.6 with web search to fetch primary changelog, migration-guide, and issue-tracker evidence for every outdated or vulnerable dependency. It validates the returned JSON against the detected dependencies and records source URLs in the breaking-change map.
 4. **Planner** (Vasu, real) turns the profile and breaking-change map into a risk-ordered upgrade plan: security fixes first, then patch, minor, major.
 5. **Surgeon** (Vasu + Faiz, real) runs Codex headless per item with the breaking-change context injected, then Faiz's Verifier re-runs affected and full tests, diffs against baseline, and feeds failures back to Codex (capped at 5 attempts before flagging `needs_human`). It also mutation-tests any new/changed tests to score how many injected bugs they actually catch.
-6. **Reviewer** (Mayank, still mocked) splits green items into small PRs ordered by risk, each with an explanation, evidence links, test/mutation scores, a confidence grade, and a rollback note.
-7. **CI watcher** (Mayank, still mocked) polls each PR's checks; on failure it pulls the logs, feeds them back to the Surgeon, and pushes a fix commit — repeating until CI passes.
+6. **Reviewer** (Mayank) splits green items into small, risk-graded PRs. Each PR contains its evidence link, verification record, confidence grade, and rollback note.
+7. **CI watcher** (Mayank) polls GitHub check runs; on failure it extracts the failing check output, asks Codex for a focused repair on the PR branch, pushes a fix commit, and rechecks (capped at two repairs).
 8. **Dashboard** (Anubhav, real) shows all of this live: a pipeline stepper, the scout report, the upgrade plan, per-item attempt/score cards with a diff viewer, and the resulting PR links.
 
-Once Mayank's Researcher/Reviewer/CI-watcher land, steps 3, 6, and 7 switch from mock data to real GPT research and real GitHub PRs — nothing else in the pipeline or dashboard needs to change, since they were built against the same contracts the mocks already satisfy.
+Mock and real implementations share the same contracts, so the dashboard and orchestrator do not change when switching modes.
 
 ## Pipeline
 
@@ -57,7 +57,10 @@ repo_surgeon/
   events.py         Async event bus used by SSE
   jobstore.py       In-memory job registry
   app.py            FastAPI application
-  mocks/            Mock Researcher, Reviewer (Scout/Sandbox/Verifier mocks retained for tests)
+  researcher.py     GPT-5.6 web-search research with source validation
+  github_layer.py   Git branch/worktree management and GitHub PR creation
+  ci.py             Check-run watcher and bounded Codex repair loop
+  mocks/            Mock services used by the safe default mode
   sandbox/          Docker sandbox manager, command runner, network policy
   scout/            Stack detection, baseline runner, coverage, dependency collection
   security/         OSV-Scanner / pip-audit / npm audit parsing and normalization
@@ -126,7 +129,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000` with the backend running on `:8000` (set `BACKEND_URL` in `dashboard/.env.local` to point elsewhere). Submitting a repo URL creates a job and opens its live page: a pipeline stepper, the scout report, the upgrade plan, per-item cards with live test counts and a diff viewer, mutation/test-quality scores (populated in real mode; mock mode shows placeholders), and PR links — mock PRs are labeled as such until Mayank's Reviewer replaces them. See [`docs/DASHBOARD_IMPLEMENTATION_PLAN.md`](docs/DASHBOARD_IMPLEMENTATION_PLAN.md) for the full design.
+Open `http://localhost:3000` with the backend running on `:8000` (set `BACKEND_URL` in `dashboard/.env.local` to point elsewhere). Submitting a repo URL creates a job and opens its live page: a pipeline stepper, the scout report, the upgrade plan, per-item cards with live test counts and a diff viewer, mutation/test-quality scores (populated in real mode; mock mode shows placeholders), and PR links. See [`docs/DASHBOARD_IMPLEMENTATION_PLAN.md`](docs/DASHBOARD_IMPLEMENTATION_PLAN.md) for the full design.
 
 ## API
 
@@ -165,11 +168,15 @@ planner = Planner.from_openai()
 
 It uses `REPO_SURGEON_MODEL` when set, otherwise `gpt-5.6`. The OpenAI key must be available as `OPENAI_API_KEY`.
 
-## Still pending
+## Real-mode credentials and safety
 
-1. Replace mock `Researcher` and `Reviewer` (real PR creation) with Mayank's implementations, and wire in the CI watcher through the existing `WATCHING_CI` hook.
-2. Use the live GPT planner when real API-backed upgrade plans are desired instead of the mock fallback behavior.
-3. Dashboard UI/UX polish — the current dashboard is functionally complete (every pipeline stage, score, diff, and PR is wired up and live) but intentionally plain; visual design is open for a follow-up pass.
+Set `REPO_SURGEON_MODE=real`, `OPENAI_API_KEY`, and `GITHUB_TOKEN` before starting the API. The GitHub token needs repository contents and pull-request read/write access; Actions/check-run read access is needed for CI watching. `GITHUB_TOKEN` is not required to construct the application, but jobs cannot open or watch live PRs without it.
+
+Real mode is deliberately opt-in: it creates remote branches and pull requests only for the repository URL submitted to that job. The reviewer creates one branch per green upgrade, and the CI repair loop is capped at two fix commits per PR; a persistent failure is reported as `needs_human` rather than silently retried forever.
+
+The plan's separate demo-fork task is not performed automatically: it needs the team to choose 2–3 source repositories and authorize forks in the GitHub account. This repository contains the pipeline needed to seed and process those chosen demos, but does not create external forks on startup.
+
+Beyond choosing demo sources, remaining product work is limited to optional live GPT planning and dashboard visual polish.
 
 ## Faiz services and real mode
 
