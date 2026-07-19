@@ -115,7 +115,7 @@ def test_profile_round_trip_and_unique_paths(tmp_path):
 @pytest.mark.asyncio
 async def test_verifier_failure_regressions(tmp_path, before, current, expected_new, expected_fixed):
     registry = ProfileRegistry(); registry.put(tmp_path, profile(before))
-    responses = [result(["git"], stdout=""), result(["git"], stdout=""), result(["pytest"], stdout=current, code=1 if "failed" in current else 0),
+    responses = [result(["git"], stdout=""), result(["git"], stdout=""),
         result(["pytest"], stdout=current, code=1 if "failed" in current else 0), result(["build"])]
     verified = await RealVerifier(registry, QueueRunner(responses)).verify(item(), tmp_path)
     assert verified.newly_failing_tests == expected_new and verified.fixed_tests == expected_fixed
@@ -125,7 +125,7 @@ async def test_verifier_failure_regressions(tmp_path, before, current, expected_
 @pytest.mark.asyncio
 async def test_verifier_unnamed_failure_affected_failure_and_build_regression(tmp_path):
     registry = ProfileRegistry(); registry.put(tmp_path, profile())
-    runner = QueueRunner([result(["git"], stdout="src/x.py"), result(["git"], stdout=""), result(["pytest"], code=2, stderr="collection error"),
+    runner = QueueRunner([result(["git"], stdout="src/x.py"), result(["git"], stdout=""),
         result(["pytest"], code=2, stderr="collection error"), result(["build"], code=1)])
     verified = await RealVerifier(registry, runner).verify(item(), tmp_path)
     assert verified.test_execution_failed and not verified.affected_tests_failed and verified.build_regression and not verified.passed
@@ -230,6 +230,62 @@ async def test_changed_file_failure_forces_full_suite_and_skips_mutation(tmp_pat
     assert verified.affected_test_result.selected_tests == []
     assert "git diff" in verified.affected_test_result.fallback_reason
     assert verified.mutation_report.status is ExecutionStatus.NOT_APPLICABLE
+
+
+@pytest.mark.asyncio
+async def test_full_suite_fallback_is_reused_and_command_metrics_are_exact(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_SURGEON_COVERAGE_POLICY", "disabled")
+    registry = ProfileRegistry(); registry.put(tmp_path, profile())
+    runner = QueueRunner([result(["git"], stdout="src/unmapped.py"), result(["git"], stdout=""),
+                          result(["pytest"], stdout="1 passed"), result(["build"])])
+    verified = await RealVerifier(registry, runner).verify(item(), tmp_path)
+    assert runner.commands == [["git", "diff", "--name-only", "HEAD"],
+        ["git", "ls-files", "--others", "--exclude-standard"], ["pytest"], ["build"]]
+    assert verified.full_suite_reused and verified.command_count == 4
+    assert verified.verification_duration_seconds >= 0
+    assert not verified.coverage_executed and not verified.mutation_executed
+
+
+@pytest.mark.asyncio
+async def test_mapped_affected_success_still_requires_final_full_suite_and_build(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_SURGEON_COVERAGE_POLICY", "disabled")
+    (tmp_path / "tests").mkdir(); (tmp_path / "tests/test_x.py").write_text("")
+    registry = ProfileRegistry(); registry.put(tmp_path, profile())
+    runner = QueueRunner([result(["git"], stdout="src/x.py"), result(["git"], stdout=""),
+                          result(["pytest", "tests/test_x.py"], stdout="1 passed"),
+                          result(["pytest"], stdout="1 passed"), result(["build"])])
+    verified = await RealVerifier(registry, runner).verify(item(), tmp_path)
+    assert runner.commands[-3:] == [["pytest", "tests/test_x.py"], ["pytest"], ["build"]]
+    assert not verified.full_suite_reused and verified.full_test_result.command == ["pytest"]
+    assert verified.command_count == 5 and verified.passed
+
+
+@pytest.mark.asyncio
+async def test_final_verification_cannot_be_green_without_a_test_command(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_SURGEON_COVERAGE_POLICY", "disabled")
+    candidate = profile()
+    candidate.baseline.test_command = None
+    registry = ProfileRegistry(); registry.put(tmp_path, candidate)
+    runner = QueueRunner([result(["git"], stdout="src/x.py"), result(["git"], stdout=""),
+                          result(["build"])])
+    verified = await RealVerifier(registry, runner).verify(item(), tmp_path)
+    assert verified.full_test_result is None and verified.test_execution_failed
+    assert not verified.passed and runner.commands[-1] == ["build"]
+
+
+@pytest.mark.asyncio
+async def test_coverage_is_delayed_until_candidate_tests_are_green(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPO_SURGEON_COVERAGE_POLICY", "final")
+    (tmp_path / "tests").mkdir(); (tmp_path / "tests/test_x.py").write_text("")
+    candidate = profile()
+    candidate.baseline.coverage_command = ["pytest", "--cov"]
+    registry = ProfileRegistry(); registry.put(tmp_path, candidate)
+    runner = QueueRunner([result(["git"], stdout="src/x.py"), result(["git"], stdout=""),
+        result(["pytest", "tests/test_x.py"], code=1,
+            stdout="FAILED tests/test_x.py::test_bad\n1 failed")])
+    verified = await RealVerifier(registry, runner).verify(item(), tmp_path)
+    assert len(runner.commands) == 3
+    assert not verified.coverage_executed and verified.affected_tests_failed
 
 
 @pytest.mark.parametrize("manager,expected", [

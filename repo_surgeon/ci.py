@@ -100,10 +100,9 @@ class CodexCIFixer:
                 "Fix this GitHub CI failure in the current repository. Make only the smallest correct edit, "
                 "run the relevant tests if available, and leave the fix uncommitted. CI logs:\n" + logs
             )
-            executable = shutil.which(self.command)
-            if not executable:
-                raise RuntimeError(f"Could not find {self.command!r} on PATH")
-            await asyncio.to_thread(subprocess.run, [executable, "exec", "--sandbox", "workspace-write", prompt],
+            from .codex_runner import RealCodexRunner
+            command = RealCodexRunner(command=self.command)._command_args()
+            await asyncio.to_thread(subprocess.run, command, input=prompt,
                                     cwd=temporary, text=True, capture_output=True, encoding="utf-8",
                                     errors="replace", check=True, timeout=self.timeout_seconds)
             diff = await self._git(temporary, "diff", "--quiet", check=False)

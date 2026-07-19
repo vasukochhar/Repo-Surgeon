@@ -34,6 +34,7 @@ class Orchestrator:
             workdir = workdir or await self.sandbox.clone(job.repo_url)
             job.profile = await self._stage(job, JobState.SCOUTING, lambda: self.scout.profile(workdir))
             changes = await self._stage(job, JobState.RESEARCHING, lambda: self.researcher.research(job.profile))
+            job.research_metrics = changes.metrics
             job.plan = await self._stage(job, JobState.PLANNING, lambda: self.planner.build_plan(job.profile, changes))
             await self._stage(job, JobState.OPERATING, self._operate(job, workdir, changes))
             green_items = [item for item in job.plan.items if any(r.item_id == item.id and r.status.value == "green" for r in job.results)]
@@ -81,7 +82,7 @@ class Orchestrator:
 
     @staticmethod
     async def _restore_worktree(workdir: Path) -> None:
-        probe = await asyncio.to_thread(subprocess.run, ["git", "rev-parse", "--is-inside-work-tree"],
+        probe = await asyncio.to_thread(subprocess.run, ["git", "rev-parse", "--verify", "HEAD"],
                                         cwd=workdir, text=True, capture_output=True, encoding="utf-8",
                                         errors="replace", check=False, timeout=30)
         if probe.returncode:
@@ -109,7 +110,9 @@ class Orchestrator:
         await self._emit(job, "started")
         started = time.monotonic()
         result = await (action() if callable(action) else action)
-        logger.info("[%s] %s: completed (%.1fs)", job.id, state.value, time.monotonic() - started)
+        duration = time.monotonic() - started
+        job.stage_durations[state.value] = round(duration, 4)
+        logger.info("[%s] %s: completed (%.1fs)", job.id, state.value, duration)
         await self._emit(job, "completed")
         return result
 

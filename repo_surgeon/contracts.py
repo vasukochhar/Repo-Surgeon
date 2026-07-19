@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import timezone, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ExecutionStatus(str, Enum):
@@ -85,6 +85,11 @@ class Dependency(BaseModel):
     ecosystem: str | None = None
     source_file: str | None = None
     requested_version: str | None = None
+    metadata_signals: list[str] = Field(default_factory=list)
+    runtime_requirements: list[str] = Field(default_factory=list)
+    metadata_sources: list[str] = Field(default_factory=list)
+    metadata_provider: str | None = None
+    explicit_override: bool = False
 
 
 class Vulnerability(BaseModel):
@@ -166,10 +171,142 @@ class ChangeDetail(BaseModel):
     migration_notes: str = ""
     known_issues: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
+    package: str = ""
+    ecosystem: str = "unknown"
+    upgrade_type: str = "unknown"
+    research_required: bool = True
+    research_status: Literal["researched", "metadata_only", "cached", "deferred", "failed", "budget_exceeded"] = "researched"
+    breaking_changes: list[str] = Field(default_factory=list)
+    required_code_changes: list[str] = Field(default_factory=list)
+    configuration_changes: list[str] = Field(default_factory=list)
+    runtime_requirements: list[str] = Field(default_factory=list)
+    security_advisories: list[str] = Field(default_factory=list)
+    evidence: list["ResearchEvidence"] = Field(default_factory=list)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    estimated_tokens: int = Field(default=0, ge=0)
+    truncated: bool = False
+    truncation_reason: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _mark_input_truncation(cls, value):
+        if not isinstance(value, dict):
+            return value
+        limits = {"breaking_changes": 10, "required_code_changes": 10,
+                  "configuration_changes": 5, "runtime_requirements": 5,
+                  "known_issues": 5, "security_advisories": 5,
+                  "sources": 5, "evidence": 5}
+        string_limits = {"migration_notes": 4000, "changelog_url": 2048,
+                         "truncation_reason": 4000}
+        exceeded = any(len(value.get(name) or []) > limit for name, limit in limits.items())
+        exceeded = exceeded or any(len(str(value.get(name) or "")) > limit
+                                   for name, limit in string_limits.items())
+        list_fields = ("breaking_changes", "required_code_changes", "configuration_changes",
+                       "runtime_requirements", "known_issues", "security_advisories")
+        exceeded = exceeded or any(any(len(str(item).strip()) > 1000 for item in value.get(name, []))
+                                   for name in list_fields)
+        if exceeded:
+            value = dict(value)
+            value["truncated"] = True
+            value.setdefault("truncation_reason", "structured research card limits")
+        return value
+
+    @field_validator("current", "target", "package", "ecosystem", "upgrade_type",
+                     "research_status", "migration_notes", "changelog_url", "truncation_reason")
+    @classmethod
+    def _bounded_string(cls, value):
+        if value is None:
+            return value
+        limit = 4000 if isinstance(value, str) and value.startswith("http") is False else 2048
+        return value[:limit]
+
+    @model_validator(mode="after")
+    def _normalize_card(self):
+        limits = {"breaking_changes": 10, "required_code_changes": 10,
+                  "configuration_changes": 5, "runtime_requirements": 5,
+                  "known_issues": 5, "security_advisories": 5}
+        for name, limit in limits.items():
+            values = []
+            seen = set()
+            for raw in getattr(self, name):
+                value = str(raw).strip()[:1000]
+                # Preserve case-sensitive API/configuration identifiers while
+                # still removing whitespace-equivalent duplicates.
+                key = " ".join(value.split())
+                if value and key not in seen:
+                    seen.add(key); values.append(value)
+            if len(values) > limit:
+                self.truncated = True
+            setattr(self, name, values[:limit])
+        urls = []
+        for url in self.sources + ([self.changelog_url] if self.changelog_url else []):
+            if url and url not in urls:
+                urls.append(url[:2048])
+        self.sources = urls[:5]
+        unique_evidence = []
+        seen_urls = set()
+        for evidence in self.evidence:
+            key = (evidence.url, " ".join(evidence.claim.lower().split()))
+            if key not in seen_urls:
+                seen_urls.add(key); unique_evidence.append(evidence)
+        self.evidence = unique_evidence[:5]
+        if self.truncated and not self.truncation_reason:
+            self.truncation_reason = "structured research card limits"
+        return self
+
+
+class ResearchEvidence(BaseModel):
+    claim: str
+    url: str
+    source_type: str
+    source_title: str | None = None
+
+    @field_validator("claim", "url", "source_type", "source_title", mode="before")
+    @classmethod
+    def _bounded_evidence_string(cls, value, info):
+        if value is None:
+            return value
+        limits = {"claim": 1000, "url": 2048, "source_type": 80, "source_title": 300}
+        return str(value).strip()[:limits[info.field_name]]
+
+
+ChangeDetail.model_rebuild()
+
+
+class ResearchMetrics(BaseModel):
+    dependency_count: int = 0
+    candidates_by_type: dict[str, int] = Field(default_factory=dict)
+    cache_hits: int = 0
+    cache_misses: int = 0
+    registry_only: int = 0
+    registry_failures: list[str] = Field(default_factory=list)
+    web_search_calls: int = 0
+    openai_attempted_calls: int = 0
+    openai_successful_calls: int = 0
+    openai_rate_limited_calls: int = 0
+    openai_retries: int = 0
+    retry_wait_seconds: float = 0.0
+    rate_limit_categories: dict[str, int] = Field(default_factory=dict)
+    rate_limit_events: list[dict[str, Any]] = Field(default_factory=list)
+    final_deferred_count: int = 0
+    configured_batch_size: int = 1
+    summarizer_calls: int = 0
+    estimated_prompt_tokens: int = 0
+    provider_input_tokens: int | None = None
+    provider_output_tokens: int | None = None
+    estimated_returned_output_tokens: int = 0
+    returned_output_tokens: int = 0
+    planner_context_tokens: int = 0
+    surgeon_context_tokens: dict[str, int] = Field(default_factory=dict)
+    deferred_packages: list[str] = Field(default_factory=list)
+    batches: list[dict[str, Any]] = Field(default_factory=list)
+    duration_seconds: float = 0.0
 
 
 class BreakingChanges(BaseModel):
     changes: dict[str, ChangeDetail] = Field(default_factory=dict)
+    metrics: ResearchMetrics = Field(default_factory=ResearchMetrics)
+    schema_version: str = "2.0"
 
 
 class UpgradeCategory(str, Enum):
@@ -219,6 +356,11 @@ class VerifyResult(BaseModel):
     full_test_result: CommandResult | None = None
     build_result: CommandResult | None = None
     concise_failure_context: str = ""
+    verification_duration_seconds: float = 0.0
+    command_count: int = 0
+    full_suite_reused: bool = False
+    coverage_executed: bool = False
+    mutation_executed: bool = False
 
     @property
     def passed(self) -> bool:

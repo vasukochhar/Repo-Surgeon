@@ -46,8 +46,9 @@ def build_orchestrator(mode: str | None = None, store: InMemoryJobStore | None =
         reviewer, ci_watcher = GitHubReviewer(GitHubClient(token)), live_ci_watcher(token)
     else:
         raise ValueError("REPO_SURGEON_MODE must be 'mock' or 'real'")
+    research_escalator = getattr(researcher, "escalate_after_verification", None)
     return Orchestrator(store, events, sandbox, scout, researcher, planner,
-        Surgeon(codex, verifier, events), reviewer, ci_watcher)
+        Surgeon(codex, verifier, events, research_escalator=research_escalator), reviewer, ci_watcher)
 
 
 app = FastAPI(title="Repo Surgeon")
@@ -74,6 +75,8 @@ async def get_job(job_id: str) -> dict:
     if not job: raise HTTPException(404, "Job not found")
     return {"id": job.id, "repo_url": job.repo_url, "state": job.state, "results": job.results, "prs": job.prs,
             "error": job.error, "profile": job.profile.model_dump(mode="json") if job.profile else None,
+            "research_metrics": job.research_metrics.model_dump(mode="json") if job.research_metrics else None,
+            "stage_durations": job.stage_durations,
             "plan": job.plan.model_dump(mode="json") if job.plan else None}
 
 

@@ -7,3 +7,4 @@ __pycache__/
 fixtures/live_codex_smoke/
 .venv/
 .env
+.repo-surgeon-cache/

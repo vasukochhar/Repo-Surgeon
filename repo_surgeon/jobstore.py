@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from uuid import uuid4
 
-from .contracts import PRResult, RepoProfile, SurgeonResult, UpgradePlan
+from .contracts import PRResult, RepoProfile, ResearchMetrics, SurgeonResult, UpgradePlan
 
 
 class JobState(str, Enum):
@@ -26,6 +26,8 @@ class Job:
     repo_url: str
     state: JobState = JobState.QUEUED
     profile: RepoProfile | None = None
+    research_metrics: ResearchMetrics | None = None
+    stage_durations: dict[str, float] = field(default_factory=dict)
     plan: UpgradePlan | None = None
     results: list[SurgeonResult] = field(default_factory=list)
     prs: list[PRResult] = field(default_factory=list)

@@ -7,7 +7,7 @@ Repo Surgeon is an autonomous codebase-modernization pipeline built for OpenAI B
 | Component | Owner | Status |
 | --- | --- | --- |
 | Orchestrator, job state machine, Surgeon self-correction loop, Codex runner, FastAPI/SSE endpoints | Vasu | Done |
-| Sandbox, Scout (stack detection, baseline, coverage), security scanners, Verifier (baseline diff, affected tests, mutation testing) | Faiz | Done |
+| Sandbox, Scout (stack detection, baseline, coverage), security scanners, Verifier (baseline diff, affected tests, mutation testing) | Faaiz | Done |
 | Dashboard (Next.js) | Anubhav | Done |
 | Evidence-backed Researcher, GitHub Reviewer/PR creation, CI watcher + bounded repair loop | Mayank | Done — enabled in real mode; demo forks need selected targets |
 
@@ -16,10 +16,10 @@ The pipeline runs end to end in mock mode by default. Real mode enables each pro
 ## What it does once every piece is real
 
 1. **Submit.** A user pastes a repo URL into the dashboard.
-2. **Scout** (Faiz, real) clones the repo into a Docker sandbox, detects the stack, runs the existing test suite/build for a baseline, and scans dependencies with OSV-Scanner/pip-audit/npm audit.
-3. **Researcher** (Mayank) asks GPT-5.6 with web search to fetch primary changelog, migration-guide, and issue-tracker evidence for every outdated or vulnerable dependency. It validates the returned JSON against the detected dependencies and records source URLs in the breaking-change map.
+2. **Scout** (Faaiz, real) clones the repo into a Docker sandbox, detects the stack, runs the existing test suite/build for a baseline, and scans dependencies with OSV-Scanner/pip-audit/npm audit.
+3. **Researcher** (Mayank) resolves compact PyPI/npm metadata first, applies a deterministic security/major/minor/patch policy, and uses GPT web search only where migration or advisory research is warranted. It validates version-specific structured research cards against the detected dependencies and retains claim-to-primary-source evidence.
 4. **Planner** (Vasu, real) turns the profile and breaking-change map into a risk-ordered upgrade plan: security fixes first, then patch, minor, major.
-5. **Surgeon** (Vasu + Faiz, real) runs Codex headless per item with the breaking-change context injected, then Faiz's Verifier re-runs affected and full tests, diffs against baseline, and feeds failures back to Codex (capped at 5 attempts before flagging `needs_human`). It also mutation-tests any new/changed tests to score how many injected bugs they actually catch.
+5. **Surgeon** (Vasu + Faaiz, real) runs Codex headless per item with only that package's bounded research card, then Faaiz's Verifier runs affected tests and the required final full suite/build, diffs against baseline, and feeds failures back to Codex (capped at 5 attempts before flagging `needs_human`). A no-mapping affected-test fallback is reused instead of immediately running the same full suite twice. Coverage is final-candidate-only, and mutation testing requires both tests and source changes.
 6. **Reviewer** (Mayank) splits green items into small, risk-graded PRs. Each PR contains its evidence link, verification record, confidence grade, and rollback note.
 7. **CI watcher** (Mayank) polls GitHub check runs; on failure it extracts the failing check output, asks Codex for a focused repair on the PR branch, pushes a fix commit, and rechecks (capped at two repairs).
 8. **Dashboard** (Anubhav, real) shows all of this live: a pipeline stepper, the scout report, the upgrade plan, per-item attempt/score cards with a diff viewer, and the resulting PR links.
@@ -58,6 +58,7 @@ repo_surgeon/
   jobstore.py       In-memory job registry
   app.py            FastAPI application
   researcher.py     GPT-5.6 web-search research with source validation
+  research/         Registry providers, routing policy, cache, token budgets, summarization
   github_layer.py   Git branch/worktree management and GitHub PR creation
   ci.py             Check-run watcher and bounded Codex repair loop
   mocks/            Mock services used by the safe default mode
@@ -166,7 +167,17 @@ $env:CODEX_API_KEY = $env:OPENAI_API_KEY
 planner = Planner.from_openai()
 ```
 
-It uses `REPO_SURGEON_MODEL` when set, otherwise `gpt-5.6`. The OpenAI key must be available as `OPENAI_API_KEY`.
+Planner, Researcher, and the optional OpenAI summarizer use only `gpt-5.6-luna`. Set both `REPO_SURGEON_MODEL` and `REPO_SURGEON_RESEARCH_MODEL` to that exact value; a different explicit or environment model is rejected instead of silently activating another model. The OpenAI key must be available as `OPENAI_API_KEY`.
+
+## Dependency research policy and budgets
+
+Research is registry-first and remains sequential with the existing single-worktree orchestrator. Security upgrades always receive advisory/fixed-version research; major upgrades receive migration research; minor upgrades use web research only when registry or constraint metadata signals compatibility work; ordinary patches use registry metadata; non-vulnerable transitive dependencies remain metadata-only. Candidates are prioritized security, major, minor, then patch and processed in configurable batches without a ten-package cutoff. Every result is marked `researched`, `metadata_only`, `cached`, `deferred`, `failed`, or `budget_exceeded`.
+
+OpenAI research defaults to one package and one concurrent request. The application owns the single retry layer (SDK retries are disabled): temporary request- or token-rate limits use up to five total attempts with randomized exponential backoff, while provider reset headers can extend the wait. Quota, billing, project-usage, model-access, and unknown rate-limit failures are not blindly retried; affected research is explicitly deferred while registry-only packages continue. Safe metrics retain categories, attempts, waits, request IDs, and provider-reported token counts without prompts, page contents, credentials, or authorization headers.
+
+The file-backed cache key includes ecosystem, normalized package, current and target versions, and research schema version. Security entries default to a one-day TTL; ordinary migration information defaults to 30 days. Cache write/read failures degrade safely, and `.repo-surgeon-cache/` is ignored by Git.
+
+The Planner receives a compact research index, not full cards or page text. The target is 8,000 tokens and the enforced absolute maximum is 20,000; lowest-priority non-security entries are explicitly budget-deferred if necessary. Each Surgeon call receives only its current package card, capped at 1,500 estimated tokens. Provider token usage is recorded separately from deterministic estimates. See [`.env.example`](.env.example) for every research, cache, context, summarization, coverage, and mutation setting.
 
 ## Real-mode credentials and safety
 
@@ -189,9 +200,9 @@ The plan's separate demo-fork task is not performed automatically: it needs the 
 
 Beyond choosing demo sources, remaining product work is limited to optional live GPT planning and dashboard visual polish.
 
-## Faiz services and real mode
+## Faaiz services and real mode
 
-Faiz's production Sandbox, Scout, security, and Verifier services integrate through Vasu's existing protocols. The default remains safe mock mode. Set `REPO_SURGEON_MODE=real` to construct the real services; imports never start Docker or scanners.
+Faaiz's production Sandbox, Scout, security, and Verifier services integrate through Vasu's existing protocols. The default remains safe mock mode. Set `REPO_SURGEON_MODE=real` to construct the real services; imports never start Docker or scanners.
 
 ```text
 RealSandbox -> RealScout -> RepoProfile -> Surgeon edits
@@ -211,7 +222,7 @@ Real mode expects Docker and Git. OSV-Scanner, pip-audit, mutmut, npm audit, and
 
 Scout detects Python and JavaScript/TypeScript manifests, lockfiles, package managers, commands, and root workspaces. It captures baseline failures, dependency trees, coverage JSON, and normalized scanner findings. A deterministic `repo_profile.json` is written in the Repo Surgeon temporary output directory, outside the inspected repository. Its main fields include `schema_version`, `repository`, `stack`, `commands`, `baseline`, `coverage_result`, `dependencies`, and `security_report`.
 
-Verifier loads the workspace-scoped profile, runs affected tests before the original full suite/build, and treats only new failures or a build regression as fatal. Targeted mutmut or project-local Stryker runs occur only when tests changed and are non-fatal when unavailable. Quality scoring reweights mutation, changed-code coverage, and stability when inputs are absent.
+Verifier loads the workspace-scoped profile, runs affected tests before the original full suite/build, and treats only new failures or a build regression as fatal. If affected-test selection cannot safely map files, its full-suite fallback is the final full-suite result and is not repeated. Coverage runs only for a green final candidate by default. Targeted mutmut or project-local Stryker runs occur only when both tests and production sources materially changed and are non-fatal when unavailable. Verification records elapsed duration, command count, and which optional stages actually ran. Quality scoring reweights mutation, changed-code coverage, and stability when inputs are absent.
 
 Current limits: Python and JavaScript/TypeScript only; root-level monorepo commands only; phase-based rather than hostname-based network rules; external scanner availability varies; mutation testing is targeted and capped.
 
@@ -222,6 +233,6 @@ python -m compileall repo_surgeon
 
 ## Current verification status
 
-- Backend: 46/46 tests pass (`python -m pytest -q`), covering the mock pipeline end to end (`QUEUED` → `DONE`), Surgeon retry behavior (fail-then-pass and five-iteration `needs_human` paths), and the job-list/profile/plan API additions.
+- Backend: run `python -m pytest -q` for the current exact count; the suite covers the mock pipeline end to end (`QUEUED` → `DONE`), structured research routing/cache/budgets, verifier command policy, Surgeon retry behavior, and the job-list/profile/plan API additions.
 - Real `codex exec`: smoke-tested with a writable sandbox and a captured Git patch.
 - Dashboard: manually verified end to end against the mock pipeline — live stepper, scores, diff viewer, and PR panel render correctly; a stale job ID after a backend restart shows a friendly "not found" page instead of crashing; two concurrent jobs in separate tabs don't cross-contaminate events; `npm run build` and `npm run lint` both pass clean.

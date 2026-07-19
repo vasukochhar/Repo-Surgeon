@@ -8,6 +8,9 @@ import time
 from typing import Awaitable, Callable
 
 from .contracts import BreakingChanges, RepoProfile, UpgradeCategory, UpgradePlan
+from .model_policy import luna_only_model
+from .research.budget import ResearchContextBudgeter
+from .research.config import ResearchConfig
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +35,15 @@ UPGRADE_ITEM_SCHEMA = (
 class Planner:
     def __init__(self, responder: Callable[[str], Awaitable[str]] | None = None) -> None:
         self._responder = responder
+        config = ResearchConfig.from_env()
+        self._research_max_tokens = config.planner_max_tokens
+        self._budgeter = ResearchContextBudgeter(target=config.planner_target_tokens,
+                                                  maximum=config.planner_max_tokens)
 
     @classmethod
     def from_openai(cls, model: str | None = None) -> "Planner":
         """Create the production planner; keep the default constructor mock-first."""
-        selected_model = model or os.environ.get("REPO_SURGEON_MODEL", "gpt-5.6-sol")
+        selected_model = luna_only_model(model, environment="REPO_SURGEON_MODEL")
         client = None
 
         async def respond(prompt: str) -> str:
@@ -54,18 +61,25 @@ class Planner:
             response = await client.responses.create(model=selected_model, input=prompt)
             logger.info("plan call to %s finished in %.1fs", selected_model, time.monotonic() - started)
             return response.output_text
+        respond.model = selected_model
         return cls(respond)
 
     async def build_plan(self, profile: RepoProfile, changes: BreakingChanges) -> UpgradePlan:
         if self._responder is None:
             return self._fallback_plan(profile, changes)
+        research_index, deferred, context_tokens = self._budgeter.planner_index(changes)
+        changes.metrics.planner_context_tokens = context_tokens
+        changes.metrics.deferred_packages = list(dict.fromkeys(changes.metrics.deferred_packages + deferred))
+        if context_tokens > self._research_max_tokens:
+            raise ValueError("Irreducible security research exceeds the Planner absolute context limit")
         prompt = (
             'Return strict JSON, no markdown, matching exactly {"items": [UpgradeItem, ...]} '
             f"where each UpgradeItem has exactly this shape: {UPGRADE_ITEM_SCHEMA}. "
             "Use only these exact field names — do not rename or add fields. "
             "Risk-score and order these upgrades (security first, then patch, minor, major). "
+            "Only produce upgrades represented in research_index; omit failed, deferred, and budget-exceeded packages. "
             f"Profile: {json.dumps(self._planner_view(profile))}; "
-            f"changes: {changes.model_dump_json()}"
+            f"research_index: {json.dumps(research_index)}. Deferred entries are unconfirmed and must not be described as researched."
         )
         last_error: Exception | None = None
         for attempt in range(1, 3):
@@ -114,10 +128,13 @@ class Planner:
     def _fallback_plan(self, profile: RepoProfile, changes: BreakingChanges) -> UpgradePlan:
         from .contracts import UpgradeItem
         vulnerable = {v.dependency for v in profile.vulnerabilities}
+        eligible = [(name, change) for name, change in changes.changes.items()
+                    if change.target != change.current and change.research_status not in
+                    {"failed", "deferred", "budget_exceeded"}]
         items = [UpgradeItem(id=f"upgrade-{index}", dependency=name, from_version=change.current,
                  to_version=change.target, category=UpgradeCategory.SECURITY if name in vulnerable else UpgradeCategory.MINOR,
                  risk=0.3, rationale="Mock-first fallback plan", breaking_change_ref=change.changelog_url)
-                 for index, (name, change) in enumerate(changes.changes.items(), 1)]
+                 for index, (name, change) in enumerate(eligible, 1)]
         return self._sort(UpgradePlan(items=items))
 
     def _sort(self, plan: UpgradePlan) -> UpgradePlan:

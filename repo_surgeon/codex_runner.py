@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from .contracts import ChangeDetail, EditResult, UpgradeItem
+from .model_policy import LUNA_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -34,13 +35,17 @@ class RealCodexRunner:
             before = await self._diff(workdir)
             started = time.monotonic()
             try:
-                command = self._command_args(prompt)
+                command = self._command_args()
                 completed = await asyncio.to_thread(subprocess.run, command, cwd=workdir,
                     check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    timeout=self.timeout_seconds)
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as error:
-                logger.warning("codex exec failed for %s after %.1fs: %s", item.id, time.monotonic() - started, error)
-                raise RuntimeError(f"codex exec failed for {item.id}: {error}") from error
+                    input=prompt, timeout=self.timeout_seconds)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                    FileNotFoundError, PermissionError, OSError) as error:
+                executable = self._resolved_display(command if "command" in locals() else None)
+                logger.warning("codex exec failed for %s via %s after %.1fs: %s",
+                               item.id, executable, time.monotonic() - started, type(error).__name__)
+                raise RuntimeError(
+                    f"codex exec failed for {item.id} via {executable}: {type(error).__name__}") from error
             logger.info("codex exec for %s finished in %.1fs", item.id, time.monotonic() - started)
             patch = await self._diff(workdir)
             return EditResult(files_changed=self._files_from_diff(patch), patch=patch if patch != before else "",
@@ -49,20 +54,27 @@ class RealCodexRunner:
             if created_agents:
                 agents.unlink(missing_ok=True)
 
-    def _command_args(self, prompt: str) -> list[str]:
-        """Resolve npm's Windows .cmd shim before invoking Codex headlessly."""
+    def _command_args(self) -> list[str]:
+        """Resolve Codex and construct fixed argv; the prompt is supplied on stdin."""
         # Prefer npm's shim on Windows: an app-installed codex.exe can be on
         # PATH first but inaccessible to a subprocess launched from Python.
         shim = shutil.which(f"{self.command}.cmd") if os.name == "nt" else None
         if shim:
             return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", shim,
-                    "exec", "--sandbox", self.sandbox, prompt]
+                    "exec", "--model", LUNA_MODEL, "--sandbox", self.sandbox, "-"]
         executable = shutil.which(self.command)
         if executable is None:
             raise FileNotFoundError(f"Could not find {self.command!r} on PATH")
         if executable.lower().endswith((".cmd", ".bat")):
-            return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", executable, "exec", prompt]
-        return [executable, "exec", "--sandbox", self.sandbox, prompt]
+            return [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", executable,
+                    "exec", "--model", LUNA_MODEL, "--sandbox", self.sandbox, "-"]
+        return [executable, "exec", "--model", LUNA_MODEL, "--sandbox", self.sandbox, "-"]
+
+    @staticmethod
+    def _resolved_display(command: list[str] | None) -> str:
+        if not command:
+            return "unresolved executable"
+        return command[4] if len(command) > 4 and command[1:4] == ["/d", "/s", "/c"] else command[0]
 
     async def _diff(self, workdir: Path) -> str:
         # Intent-to-add makes untracked files visible in the patch without
