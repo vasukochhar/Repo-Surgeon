@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import subprocess
+import time
 from pathlib import Path
 
 from .contracts import Event, PRRequest
@@ -10,6 +12,8 @@ from .interfaces import CIWatcherService, ResearcherService, ReviewerService, Sa
 from .jobstore import InMemoryJobStore, Job, JobState
 from .planner import Planner
 from .surgeon import Surgeon
+
+logger = logging.getLogger(__name__)
 
 
 class Orchestrator:
@@ -25,6 +29,7 @@ class Orchestrator:
         if not job:
             raise KeyError(job_id)
         owned_workspace = workdir is None
+        logger.info("[%s] starting: %s", job_id, job.repo_url)
         try:
             workdir = workdir or await self.sandbox.clone(job.repo_url)
             job.profile = await self._stage(job, JobState.SCOUTING, lambda: self.scout.profile(workdir))
@@ -37,9 +42,11 @@ class Orchestrator:
                           repo_url=job.repo_url, workdir=str(workdir))))
             job.prs = await self._stage(job, JobState.WATCHING_CI, lambda: self._watch_ci(job.prs, workdir))
             job.state = JobState.NEEDS_HUMAN if any(r.status.value == "needs_human" for r in job.results) else JobState.DONE
+            logger.info("[%s] finished: %s (%d PR(s), %d result(s))", job_id, job.state.value, len(job.prs), len(job.results))
             await self._emit(job, "completed")
         except Exception as error:
             job.state, job.error = JobState.FAILED, str(error)
+            logger.exception("[%s] failed", job_id)
             await self._emit(job, "failed", {"error": job.error})
         finally:
             cleanup_profile = getattr(self.scout, "cleanup_profile", None)
@@ -60,8 +67,13 @@ class Orchestrator:
 
     async def _operate(self, job: Job, workdir: Path, changes) -> None:
         assert job.plan is not None
-        for item in job.plan.items:
-            job.results.append(await self.surgeon.operate(job.id, workdir, item, changes))
+        for index, item in enumerate(job.plan.items, 1):
+            logger.info("[%s] operating %d/%d: %s %s -> %s", job.id, index, len(job.plan.items),
+                       item.dependency, item.from_version, item.to_version)
+            result = await self.surgeon.operate(job.id, workdir, item, changes)
+            job.results.append(result)
+            logger.info("[%s] item %s: %s after %d iteration(s)", job.id, item.dependency,
+                       result.status.value, result.iterations)
             # Each reviewer branch must contain only this upgrade. Production
             # sandboxes are fresh clones, so restoring HEAD after capturing the
             # item's patch gives the next Surgeon run an equally clean baseline.
@@ -70,15 +82,18 @@ class Orchestrator:
     @staticmethod
     async def _restore_worktree(workdir: Path) -> None:
         probe = await asyncio.to_thread(subprocess.run, ["git", "rev-parse", "--is-inside-work-tree"],
-                                        cwd=workdir, text=True, capture_output=True, check=False)
+                                        cwd=workdir, text=True, capture_output=True, encoding="utf-8",
+                                        errors="replace", check=False, timeout=30)
         if probe.returncode:
             return
         restored = await asyncio.to_thread(subprocess.run, ["git", "restore", "--source=HEAD", "--staged", "--worktree", "."],
-                                             cwd=workdir, text=True, capture_output=True, check=False)
+                                             cwd=workdir, text=True, capture_output=True, encoding="utf-8",
+                                             errors="replace", check=False, timeout=30)
         if restored.returncode:
             raise RuntimeError(f"could not restore clean item workspace: {restored.stderr.strip()}")
         cleaned = await asyncio.to_thread(subprocess.run, ["git", "clean", "-fd"], cwd=workdir,
-                                           text=True, capture_output=True, check=False)
+                                           text=True, capture_output=True, encoding="utf-8",
+                                           errors="replace", check=False, timeout=30)
         if cleaned.returncode:
             raise RuntimeError(f"could not clean item workspace: {cleaned.stderr.strip()}")
 
@@ -90,8 +105,11 @@ class Orchestrator:
 
     async def _stage(self, job: Job, state: JobState, action):
         job.state = state
+        logger.info("[%s] %s: started", job.id, state.value)
         await self._emit(job, "started")
+        started = time.monotonic()
         result = await (action() if callable(action) else action)
+        logger.info("[%s] %s: completed (%.1fs)", job.id, state.value, time.monotonic() - started)
         await self._emit(job, "completed")
         return result
 

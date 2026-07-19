@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import subprocess
 import tempfile
@@ -10,7 +11,9 @@ from pathlib import Path
 from typing import Optional, Protocol
 
 from .contracts import PRResult
-from .github_layer import GitHubClient
+from .github_layer import GitHubClient, _run_git
+
+logger = logging.getLogger(__name__)
 
 
 class CheckRunClient(Protocol):
@@ -43,21 +46,28 @@ class GitHubCIWatcher:
             checks = await self.client.check_runs(repository, current.head_sha)
             polls += 1
             if not checks or any(check.get("status") != "completed" for check in checks):
+                logger.info("PR %s: checks still running (poll %d/%d)", pr.url, polls, self.max_polls)
                 if polls < self.max_polls:
                     await asyncio.sleep(self.poll_seconds)
                 continue
             failures = [check for check in checks if check.get("conclusion") not in {"success", "neutral", "skipped"}]
             if not failures:
+                logger.info("PR %s: CI passed", pr.url)
                 return current.model_copy(update={"ci_status": "passed", "ci_logs": None})
             logs = self._failure_logs(failures)
             if self.repair is None or repairs >= self.max_repairs:
+                logger.info("PR %s: CI failed, no repair attempted (repairs=%d/%d)", pr.url, repairs, self.max_repairs)
                 return current.model_copy(update={"ci_status": "failed", "ci_logs": logs})
+            logger.info("PR %s: CI failed, attempting repair %d/%d", pr.url, repairs + 1, self.max_repairs)
             repaired_sha = await self.repair(current, logs, workdir)
             if not repaired_sha:
+                logger.info("PR %s: repair produced no fix, needs_human", pr.url)
                 return current.model_copy(update={"ci_status": "needs_human", "ci_logs": logs})
+            logger.info("PR %s: repair pushed %s", pr.url, repaired_sha)
             current = current.model_copy(update={"head_sha": repaired_sha, "ci_status": "repairing", "ci_logs": logs})
             repairs += 1
             polls = 0
+        logger.info("PR %s: timed out waiting for CI", pr.url)
         return current.model_copy(update={"ci_status": "timed_out", "ci_logs": "Timed out waiting for GitHub checks."})
 
     @staticmethod
@@ -94,7 +104,8 @@ class CodexCIFixer:
             if not executable:
                 raise RuntimeError(f"Could not find {self.command!r} on PATH")
             await asyncio.to_thread(subprocess.run, [executable, "exec", "--sandbox", "workspace-write", prompt],
-                                    cwd=temporary, text=True, capture_output=True, check=True, timeout=self.timeout_seconds)
+                                    cwd=temporary, text=True, capture_output=True, encoding="utf-8",
+                                    errors="replace", check=True, timeout=self.timeout_seconds)
             diff = await self._git(temporary, "diff", "--quiet", check=False)
             if diff.returncode == 0:
                 return None
@@ -109,8 +120,7 @@ class CodexCIFixer:
 
     @staticmethod
     async def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        completed = await asyncio.to_thread(subprocess.run, ["git", *args], cwd=cwd, text=True,
-                                            capture_output=True, check=False)
+        completed = await asyncio.to_thread(_run_git, cwd, args)
         if check and completed.returncode:
             raise RuntimeError(f"git {' '.join(args)} failed: {completed.stderr.strip()}")
         return completed

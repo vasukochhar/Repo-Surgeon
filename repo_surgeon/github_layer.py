@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import re
 import shutil
 import subprocess
@@ -14,9 +16,31 @@ from urllib.request import Request, urlopen
 
 from .contracts import PRRequest, PRResult, SurgeonResult, UpgradeItem
 
+logger = logging.getLogger(__name__)
+
 
 class GitHubAPIError(RuntimeError):
     pass
+
+
+GIT_NETWORK_TIMEOUT_SECONDS = 60
+
+
+def _run_git(cwd: Path, args: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    """Run git with a hard timeout and no interactive credential prompt.
+
+    Without GIT_TERMINAL_PROMPT=0, a stale or invalid GITHUB_TOKEN makes fetch/
+    push block forever on stdin instead of failing — the timeout is a backstop
+    for any other network stall (DNS, connection drop) that the flag can't catch.
+    """
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        return subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True,
+                              encoding="utf-8", errors="replace",
+                              check=False, env=env, timeout=GIT_NETWORK_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        return subprocess.CompletedProcess(error.cmd, returncode=124, stdout=error.stdout or "",
+                                           stderr=(error.stderr or "") + f"\ntimed out after {GIT_NETWORK_TIMEOUT_SECONDS}s")
 
 
 class GitHubClient:
@@ -67,6 +91,7 @@ class GitHubReviewer:
         for item in request.items:
             result = evidence.get(item.id)
             if result is None or not result.patch.strip():
+                logger.info("skipping PR for %s: no green patch to review", item.dependency)
                 continue
             branch = self._branch_name(request.branch, item)
             sha = await self._commit_patch(workdir, base, branch, result.patch, self._commit_message(item))
@@ -74,6 +99,7 @@ class GitHubReviewer:
                 repository, title=f"{item.category.value}: upgrade {item.dependency} to {item.to_version}",
                 head=branch, base=base, body=self.pr_body(item, result),
             )
+            logger.info("opened PR for %s: %s", item.dependency, pull["html_url"])
             results.append(PRResult(url=pull["html_url"], number=pull.get("number"), branch=branch, head_sha=sha,
                                     item_ids=[item.id], ci_status="pending", repository=repository))
         return results
@@ -133,8 +159,7 @@ class GitHubReviewer:
         return f"chore(deps): upgrade {item.dependency} to {item.to_version}"
 
     async def _git(self, cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        completed = await asyncio.to_thread(subprocess.run, ["git", *args], cwd=cwd, text=True,
-                                            capture_output=True, check=False)
+        completed = await asyncio.to_thread(_run_git, cwd, args)
         if check and completed.returncode:
             raise RuntimeError(f"git {' '.join(args)} failed: {completed.stderr.strip()}")
         return completed

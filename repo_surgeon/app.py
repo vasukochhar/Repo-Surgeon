@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import logging
 import os
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -18,6 +19,14 @@ from .sandbox import AsyncCommandRunner, RealSandbox, SandboxedCommandRunner
 from .scout import ProfileRegistry, RealScout
 from .surgeon import Surgeon
 from .verifier import RealVerifier
+
+# uvicorn only configures its own "uvicorn.*" loggers; without this, every
+# logger.info() call in the pipeline (repo_surgeon.*) is silently dropped by
+# the root logger's default WARNING level, so the terminal shows request
+# lines but nothing about what a job is actually doing.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+                    datefmt="%H:%M:%S")
+logging.getLogger("repo_surgeon").setLevel(logging.INFO)
 
 
 def build_orchestrator(mode: str | None = None, store: InMemoryJobStore | None = None,

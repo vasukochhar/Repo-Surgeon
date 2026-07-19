@@ -10,7 +10,7 @@ from ..contracts import CommandResult, ExecutionStatus
 
 
 class AsyncCommandRunner:
-    def __init__(self, default_timeout: float = 300, max_output_chars: int = 200_000) -> None:
+    def __init__(self, default_timeout: float = 300, max_output_chars: int = 5_000_000) -> None:
         self.default_timeout = default_timeout
         self.max_output_chars = max_output_chars
 

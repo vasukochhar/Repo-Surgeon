@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from .contracts import ChangeDetail, EditResult, UpgradeItem
+
+logger = logging.getLogger(__name__)
 
 
 class RealCodexRunner:
@@ -28,12 +32,16 @@ class RealCodexRunner:
             agents.write_text("# Repo Surgeon\nMake focused dependency migration edits. Preserve existing project conventions.\n", encoding="utf-8")
         try:
             before = await self._diff(workdir)
+            started = time.monotonic()
             try:
                 command = self._command_args(prompt)
                 completed = await asyncio.to_thread(subprocess.run, command, cwd=workdir,
-                    check=True, capture_output=True, text=True, timeout=self.timeout_seconds)
+                    check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=self.timeout_seconds)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as error:
+                logger.warning("codex exec failed for %s after %.1fs: %s", item.id, time.monotonic() - started, error)
                 raise RuntimeError(f"codex exec failed for {item.id}: {error}") from error
+            logger.info("codex exec for %s finished in %.1fs", item.id, time.monotonic() - started)
             patch = await self._diff(workdir)
             return EditResult(files_changed=self._files_from_diff(patch), patch=patch if patch != before else "",
                               logs=f"{completed.stdout}\n{completed.stderr}".strip())
@@ -60,9 +68,10 @@ class RealCodexRunner:
         # Intent-to-add makes untracked files visible in the patch without
         # staging their content, so a reviewer can reproduce a full migration.
         await asyncio.to_thread(subprocess.run, ["git", "add", "-N", "."], cwd=workdir,
-                                check=True, capture_output=True, text=True)
+                                check=True, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=30)
         result = await asyncio.to_thread(subprocess.run, ["git", "diff", "--binary"], cwd=workdir,
-            check=True, capture_output=True, text=True)
+            check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
         return result.stdout
 
     @staticmethod
