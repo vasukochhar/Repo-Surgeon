@@ -7,3 +7,7 @@ __pycache__/
 fixtures/live_codex_smoke/
 .venv/
 .env
+
+# Per-job data-flow dumps from E2E test runs. May contain repo source and
+# scanner output, and grows unboundedly — keep it local.
+test_results/

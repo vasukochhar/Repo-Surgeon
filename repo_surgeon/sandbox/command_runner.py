@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from ..contracts import CommandResult, ExecutionStatus
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncCommandRunner:
@@ -58,11 +61,32 @@ class AsyncCommandRunner:
     def _result(self, command: Sequence[str], cwd: Path | None, exit_code: int | None,
                 stdout: bytes, stderr: bytes, started: float, status: ExecutionStatus,
                 timed_out: bool = False, unavailable: bool = False) -> CommandResult:
-        return CommandResult(command=list(command), cwd=str(cwd) if cwd else None,
+        result = CommandResult(command=list(command), cwd=str(cwd) if cwd else None,
             exit_code=exit_code, stdout=self._truncate(stdout.decode(errors="replace")),
             stderr=self._truncate(stderr.decode(errors="replace")),
             duration_seconds=round(time.monotonic() - started, 4), timed_out=timed_out,
             status=status, tool_unavailable=unavailable)
+        self._log(result)
+        return result
+
+    @staticmethod
+    def _log(result: CommandResult) -> None:
+        """Every scan, test run and git call in the pipeline lands here.
+
+        Without this the whole subprocess layer is invisible: a missing scanner
+        binary or a test command that exits 127 is indistinguishable from one
+        that legitimately found nothing.
+        """
+        rendered = " ".join(result.command)
+        if len(rendered) > 300:
+            rendered = rendered[:300] + " ..."
+        level = logging.INFO if result.status is ExecutionStatus.PASSED else logging.WARNING
+        logger.log(level, "cmd %s -> %s (exit=%s, %.1fs) in %s", rendered, result.status.value,
+                   result.exit_code, result.duration_seconds, result.cwd or ".")
+        if result.status is not ExecutionStatus.PASSED:
+            tail = (result.stderr or result.stdout).strip().splitlines()[-15:]
+            if tail:
+                logger.warning("cmd %s output tail:\n%s", result.command[0], "\n".join(tail))
 
     def _truncate(self, value: str) -> str:
         if len(value) <= self.max_output_chars:

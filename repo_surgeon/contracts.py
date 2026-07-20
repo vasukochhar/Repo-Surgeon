@@ -75,6 +75,7 @@ class Baseline(BaseModel):
     build_result: CommandResult | None = None
     install_result: CommandResult | None = None
     failure_fingerprints: list[str] = Field(default_factory=list)
+    collection_failed: bool = False
 
 
 class Dependency(BaseModel):
@@ -157,6 +158,13 @@ class RepoProfile(BaseModel):
     sandbox_metadata: dict[str, Any] = Field(default_factory=dict)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     profile_path: str | None = None
+    # Files Scout asked Codex to write because no test suite existed (see
+    # scout/service.py's _bootstrap_tests). These must survive every upgrade
+    # item's worktree cleanup so verification keeps working across the whole
+    # operate loop, but never end up inside any single item's own PR patch —
+    # Surgeon/CodexRunner and Orchestrator both read this list to exclude
+    # them from diff collection and `git clean`, respectively.
+    bootstrap_test_paths: list[str] = Field(default_factory=list)
 
 
 class ChangeDetail(BaseModel):

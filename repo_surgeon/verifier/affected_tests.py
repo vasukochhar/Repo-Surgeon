@@ -23,10 +23,19 @@ class AffectedTests:
 
     async def run(self, root: Path, changed: list[str], profile: RepoProfile,
                   forced_fallback_reason: str | None = None) -> AffectedTestResult:
+        base = profile.baseline.test_command or profile.commands.test or []
+        if not base:
+            # No known way to invoke tests for this stack (e.g. Scout couldn't
+            # identify a test runner). select() below matches purely on
+            # filename ("test" in the name), so without this guard `_command`
+            # would return those bare filenames as the command itself — its
+            # first element becomes argv[0], and the sandbox tries to exec a
+            # source/bytecode file directly instead of running it under pytest.
+            return AffectedTestResult(selected_tests=[], command=[], result=None,
+                fallback_reason="no test command detected for this stack", duration_seconds=0)
         tests, reason = self.select(root, changed, profile)
         if forced_fallback_reason:
             tests, reason = [], forced_fallback_reason
-        base = profile.baseline.test_command or profile.commands.test or []
         command = self._command(base, tests, profile)
         result = await self.runner.run(command, cwd=root) if command else None
         return AffectedTestResult(selected_tests=tests, command=command, result=result,

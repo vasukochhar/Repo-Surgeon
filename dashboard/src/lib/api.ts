@@ -30,3 +30,15 @@ export function getJob(jobId: string): Promise<JobDetail> {
 export function jobEventsUrl(jobId: string): string {
   return `${BASE}/jobs/${jobId}/events`;
 }
+
+export function jobLogsStreamUrl(jobId: string): string {
+  return `${BASE}/jobs/${jobId}/logs/stream`;
+}
+
+export function listTraceFiles(jobId: string): Promise<{ files: string[] }> {
+  return request(`/jobs/${jobId}/trace`);
+}
+
+export function getTraceFile(jobId: string, filename: string): Promise<unknown> {
+  return request(`/jobs/${jobId}/trace/${encodeURIComponent(filename)}`);
+}

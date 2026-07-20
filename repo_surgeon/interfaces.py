@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Protocol
 
@@ -35,4 +36,6 @@ class CIWatcherService(Protocol):
 
 class CodexRunner(Protocol):
     async def edit(self, workdir: Path, item: UpgradeItem, breaking_change: ChangeDetail | None,
-                   failure_context: str | None = None) -> EditResult: ...
+                   failure_context: str | None = None, preserve_paths: Iterable[str] = ()) -> EditResult: ...
+
+    async def write_tests(self, workdir: Path, language: str) -> EditResult: ...

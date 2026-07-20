@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 import shutil
 import tempfile
 from pathlib import Path
@@ -64,19 +65,37 @@ class RealSandbox:
                          "repo-surgeon-python:local", "repo-surgeon-node:local"}:
             raise InvalidRepositoryError("unapproved sandbox image")
         if await self.docker_available():
-            args = ["docker", "run", "--rm", "--init", "--cap-drop=ALL",
+            args = ["docker", "run", "--rm", "--init", "--cap-drop=ALL", "--user", "0:0",
                 "--security-opt", "no-new-privileges", "--memory", self.policy.memory,
                 "--cpus", str(self.policy.cpus), "--pids-limit", str(self.policy.pids_limit),
                 "--network", self.policy.network.docker_mode(phase),
-                "--env", "PYTHONPATH=/workspace/.repo-surgeon-deps",
                 "--env", "GIT_CONFIG_COUNT=1",
                 "--env", "GIT_CONFIG_KEY_0=safe.directory",
                 "--env", "GIT_CONFIG_VALUE_0=/workspace",
                 "--mount", f"type=bind,src={resolved},dst=/workspace",
                 "--workdir", "/workspace", "--tmpfs", "/tmp:rw,noexec,nosuid,size=512m"]
+            # pip-audit resolves its own (compatible) `requests` stack; pointing
+            # PYTHONPATH at the target repo's installed deps shadows it with an
+            # old/incompatible version and breaks the scan. Every other command
+            # (app/test execution) needs the deps on the path to run at all.
+            if not (command and "pip_audit" in command):
+                args += ["--env", "PYTHONPATH=/workspace/.repo-surgeon-deps"]
             if self.policy.read_only:
                 args.append("--read-only")
-            args += [image, *command]
+            # Running as root (above) means every file the container creates
+            # on the bind mount — .pytest_cache, tests/__pycache__, etc. — is
+            # root-owned. Docker Desktop's Windows bind-mount translation then
+            # makes those paths inaccessible to the host process that runs
+            # `git clean`/`git restore` between upgrade items (see
+            # orchestrator._restore_worktree), which crashes the job with a
+            # bare "Permission denied". Chmod the tree open again from inside
+            # the same container invocation (no extra `docker run` round
+            # trip) so the host can always read/delete whatever gets left
+            # behind, while still reporting the real command's exit code.
+            quoted = shlex.join(command)
+            wrapped = ["sh", "-c",
+                      f"{quoted}; status=$?; chmod -R a+rwX /workspace 2>/dev/null || true; exit $status"]
+            args += [image, *wrapped]
             return await self.runner.run(args, timeout=timeout or self.policy.timeout_seconds)
         if self.allow_host_execution:
             return await self.runner.run(command, cwd=workdir, timeout=timeout or self.policy.timeout_seconds)

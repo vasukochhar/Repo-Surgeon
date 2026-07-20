@@ -2,25 +2,58 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
-import time
 from collections.abc import Awaitable, Callable
 
+from . import llm
 from .contracts import BreakingChanges, Dependency, RepoProfile
+from .trace import current_tracer
 
 logger = logging.getLogger(__name__)
 
-ResearchResponder = Callable[[str], Awaitable[str]]
+ResearchResponder = Callable[..., Awaitable[str]]
 
 # Research is evidence gathering, not reasoning: run it on the cheap fast tier
 # and keep the flagship model for the Planner only.
 DEFAULT_RESEARCH_MODEL = "gpt-5.6-luna"
-# Cap volume so research cost/latency stays bounded on repos with many findings.
-MAX_CANDIDATES = 10
+# A safety ceiling, not a deliberate cost trim: with batching + concurrent
+# batches (below), researching more packages costs wall-clock time, not
+# rate-limit risk, so there's no reason to silently drop real repos' upgrades.
+# This just stops a pathological case (a lockfile-parsing bug that yields
+# thousands of "candidates") from spinning the stage forever.
+MAX_CANDIDATES = int(os.environ.get("REPO_SURGEON_MAX_CANDIDATES", "500"))
 RESEARCH_TIMEOUT_SECONDS = 240.0
 SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+# Web search is the pipeline's heaviest token consumer, and measurement shows
+# the weight is almost entirely on the *input* side: a two-package call billed
+# 27k input tokens (fetched page content) against 1.2k output. Capping output
+# therefore does nearly nothing for rate limiting — what matters is never
+# letting one call get large. So the candidate list is split into small
+# batches. Batches run concurrently (bounded by llm.py's REPO_SURGEON_LLM_
+# CONCURRENCY gate, which also staggers each call's *start* by
+# REPO_SURGEON_LLM_MIN_INTERVAL) so a 50-dependency repo finishes in
+# roughly (batches / concurrency) call-durations instead of finishing
+# batch-by-batch back to back.
+RESEARCH_BATCH_SIZE = int(os.environ.get("REPO_SURGEON_RESEARCH_BATCH_SIZE", "3"))
+
+# Output budget per batch. Reasoning tokens are drawn from max_output_tokens
+# before any JSON is emitted — an observed 578 of them at "low" effort — so the
+# reserve below is what stops a budget sized only for the payload from
+# truncating mid-string. Truncation is still detected in llm.respond() and
+# retried once at double the budget rather than failing the stage.
+RESEARCH_REASONING_RESERVE = int(os.environ.get("REPO_SURGEON_RESEARCH_REASONING_RESERVE", "900"))
+RESEARCH_TOKENS_PER_CANDIDATE = int(os.environ.get("REPO_SURGEON_RESEARCH_TOKENS_PER_CANDIDATE", "500"))
+
+
+def research_token_budget(candidate_count: int) -> int:
+    override = os.environ.get("REPO_SURGEON_RESEARCH_MAX_OUTPUT_TOKENS")
+    if override:
+        return int(override)
+    return RESEARCH_REASONING_RESERVE + RESEARCH_TOKENS_PER_CANDIDATE * max(1, candidate_count)
 
 
 class OpenAIResearcher:
@@ -36,66 +69,142 @@ class OpenAIResearcher:
     @classmethod
     def from_openai(cls, model: str | None = None) -> "OpenAIResearcher":
         selected_model = model or os.environ.get("REPO_SURGEON_RESEARCH_MODEL", DEFAULT_RESEARCH_MODEL)
-        client = None
 
-        async def respond(prompt: str) -> str:
-            nonlocal client
-            if client is None:
-                from openai import AsyncOpenAI
-                # Keep the SDK's default retry/backoff: a 429 can mean either
-                # "out of quota" (retrying never helps) or "over the per-minute
-                # token rate" (retrying in a few seconds succeeds) — the SDK
-                # can't tell them apart either, so it backs off and retries both.
-                # The outer asyncio.wait_for timeout is what actually bounds the
-                # worst case, so retries here can never turn into a silent hang.
-                client = AsyncOpenAI()
-            started = time.monotonic()
-            response = await client.responses.create(
+        async def respond(prompt: str, max_output_tokens: int | None = None) -> str:
+            # Pacing, 429 backoff and token accounting all live in llm.respond()
+            # so a rate-limit stall shows up in the log instead of as dead air.
+            return await llm.respond(
+                stage="research",
                 model=selected_model,
+                prompt=prompt,
                 # "low": the model needs a version number and a source URL per
                 # package, not a deep read of each page — "medium" (the
                 # default) pulls enough fetched page content into context to
                 # burn tens of thousands of tokens per call for no benefit here.
                 tools=[{"type": "web_search", "search_context_size": "low"}],
-                input=prompt,
+                max_output_tokens=max_output_tokens,
+                reasoning={"effort": "low"},
             )
-            logger.info("research call to %s finished in %.1fs", selected_model, time.monotonic() - started)
-            return response.output_text
 
         return cls(respond)
 
+    async def _research_batch(self, batch: list[Dependency], number: int,
+                              tracer) -> BreakingChanges | None:
+        """One batch, retried once at double the output budget if it truncates.
+
+        Returns None when the batch cannot be salvaged, so the caller can keep
+        the packages from other batches instead of losing the whole stage.
+        """
+        logger.info("research batch %d starting: %s", number, [candidate.name for candidate in batch])
+        prompt = self._prompt(batch)
+        budget = research_token_budget(len(batch))
+        for attempt in (1, 2):
+            try:
+                response = await asyncio.wait_for(self._ask(prompt, budget),
+                                                  timeout=RESEARCH_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                logger.warning("research batch %d timed out after %.0fs", number, RESEARCH_TIMEOUT_SECONDS)
+                tracer.write(f"research_batch{number}", "error",
+                             {"timeout_seconds": RESEARCH_TIMEOUT_SECONDS, "attempt": attempt})
+                return None
+            try:
+                return BreakingChanges.model_validate(json.loads(self._json_object(response)))
+            except (json.JSONDecodeError, ValueError) as error:
+                truncated = not self._json_object(response).rstrip().endswith("}")
+                logger.warning("research batch %d attempt %d returned unparseable JSON (%d chars, "
+                               "looks %s): %s", number, attempt, len(response),
+                               "truncated" if truncated else "malformed", error)
+                tracer.write(f"research_batch{number}", "error",
+                             {"attempt": attempt, "raw_response": response, "parse_error": str(error),
+                              "looks_truncated": truncated, "max_output_tokens": budget})
+                if attempt == 1 and truncated:
+                    budget *= 2
+                    logger.info("research batch %d retrying with max_output_tokens=%d", number, budget)
+                    continue
+                return None
+        return None
+
+    async def _ask(self, prompt: str, max_output_tokens: int) -> str:
+        """Call the responder, passing the token budget only if it accepts one.
+
+        Tests inject plain ``async def (prompt)`` stubs; the production responder
+        takes a budget. Inspecting once keeps both working without a try/except
+        that could swallow a genuine TypeError from inside the responder.
+        """
+        assert self._responder is not None
+        try:
+            accepts_budget = len(inspect.signature(self._responder).parameters) > 1
+        except (TypeError, ValueError):
+            accepts_budget = False
+        if accepts_budget:
+            return await self._responder(prompt, max_output_tokens)
+        return await self._responder(prompt)
+
     async def research(self, profile: RepoProfile) -> BreakingChanges:
+        tracer = current_tracer()
         candidates = self._candidates(profile)
-        logger.info("researching %d candidate(s): %s", len(candidates), [c.name for c in candidates])
+        logger.info("researching %d candidate(s) (cap %d): %s",
+                    len(candidates), MAX_CANDIDATES, [c.name for c in candidates])
+        tracer.write("research", "input", {
+            "candidates": candidates,
+            "candidate_count": len(candidates),
+            "max_candidates": MAX_CANDIDATES,
+            "batch_size": RESEARCH_BATCH_SIZE,
+            "max_output_tokens_per_batch": research_token_budget(min(RESEARCH_BATCH_SIZE, len(candidates))),
+            "profile_dependencies": len(profile.dependencies),
+            "profile_vulnerabilities": len(profile.vulnerabilities),
+        })
         if not candidates:
+            logger.info("no upgrade candidates — skipping the research call entirely")
+            tracer.write("research", "output", BreakingChanges(), skipped="no candidates")
             return BreakingChanges()
         if self._responder is None:
             raise RuntimeError(
                 "Live research requires OpenAIResearcher.from_openai() and OPENAI_API_KEY. "
                 "Use mock mode for an offline demo."
             )
-        prompt = self._prompt(candidates)
-        try:
-            response = await asyncio.wait_for(self._responder(prompt), timeout=RESEARCH_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            logger.warning("research timed out after %.0fs; degrading to no migration notes", RESEARCH_TIMEOUT_SECONDS)
-            # Degrade rather than hang: the Planner can still order security bumps
-            # without migration notes, and the item simply lacks evidence links.
-            return BreakingChanges()
-        try:
-            research = BreakingChanges.model_validate(json.loads(self._json_object(response)))
-        except (json.JSONDecodeError, ValueError) as error:
-            raise ValueError("Researcher returned invalid BreakingChanges JSON") from error
+        batches = [candidates[start:start + RESEARCH_BATCH_SIZE]
+                   for start in range(0, len(candidates), RESEARCH_BATCH_SIZE)]
+        logger.info("research split into %d batch(es) of <=%d package(s), running concurrently "
+                    "(gated by REPO_SURGEON_LLM_CONCURRENCY)", len(batches), RESEARCH_BATCH_SIZE)
+        outcomes = await asyncio.gather(
+            *(self._research_batch(batch, number, tracer) for number, batch in enumerate(batches, 1)))
+        research = BreakingChanges()
+        for number, (batch, detail) in enumerate(zip(batches, outcomes), 1):
+            names = [candidate.name for candidate in batch]
+            if detail is None:
+                # One bad batch must not cost the whole stage: the packages it
+                # covered simply arrive at the Planner without migration notes.
+                logger.warning("research batch %d/%d failed; continuing without notes for %s",
+                               number, len(batches), names)
+                continue
+            logger.info("research batch %d/%d ok: %s", number, len(batches), names)
+            research.changes.update(detail.changes)
         expected = {dependency.name: dependency for dependency in candidates}
         # Reject model additions and fill the source list from the primary changelog
         # so each planner item can always cite its research provenance.
+        returned = dict(research.changes)
         research.changes = {
             name: detail.model_copy(update={
                 "sources": list(dict.fromkeys(detail.sources + ([detail.changelog_url] if detail.changelog_url else [])))
             })
-            for name, detail in research.changes.items()
+            for name, detail in returned.items()
             if name in expected and detail.current == expected[name].version
         }
+        rejected = {
+            name: ("not a requested package" if name not in expected
+                   else f"current {detail.current!r} != profile {expected[name].version!r}")
+            for name, detail in returned.items() if name not in research.changes
+        }
+        if rejected:
+            # Silent today: a model that drifts on every version string yields an
+            # empty plan with no explanation anywhere. Name each drop.
+            logger.warning("research dropped %d/%d package(s) as unusable: %s",
+                           len(rejected), len(returned), rejected)
+        logger.info("research kept %d change(s): %s", len(research.changes), sorted(research.changes))
+        tracer.write("research", "output", {
+            "changes": research, "kept": sorted(research.changes),
+            "rejected": rejected, "requested": sorted(expected)})
         return research
 
     @staticmethod

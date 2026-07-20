@@ -4,16 +4,20 @@ import asyncio
 import json
 import logging
 import os
-import time
 from typing import Awaitable, Callable
 
+from . import llm
 from .contracts import BreakingChanges, RepoProfile, UpgradeCategory, UpgradePlan
+from .trace import current_tracer
 
 logger = logging.getLogger(__name__)
 
 CATEGORY_ORDER = {UpgradeCategory.SECURITY: 0, UpgradeCategory.PATCH: 1,
                   UpgradeCategory.MINOR: 2, UpgradeCategory.MAJOR: 3}
 PLAN_TIMEOUT_SECONDS = 120.0
+# One UpgradeItem is ~120 tokens of JSON; the plan is capped by the research
+# candidate list, so this covers a full plan with reasoning headroom to spare.
+PLAN_MAX_OUTPUT_TOKENS = int(os.environ.get("REPO_SURGEON_PLAN_MAX_OUTPUT_TOKENS", "3000"))
 
 # The prompt must spell out these exact field names: naming a schema by class
 # name ("UpgradeItem") without defining its shape lets the model invent
@@ -37,42 +41,42 @@ class Planner:
     def from_openai(cls, model: str | None = None) -> "Planner":
         """Create the production planner; keep the default constructor mock-first."""
         selected_model = model or os.environ.get("REPO_SURGEON_MODEL", "gpt-5.6-sol")
-        client = None
 
         async def respond(prompt: str) -> str:
-            nonlocal client
-            if client is None:
-                from openai import AsyncOpenAI
-                # Keep the SDK's default retry/backoff: a 429 can mean either
-                # "out of quota" (retrying never helps) or "over the per-minute
-                # token rate" (retrying in a few seconds succeeds) — the SDK
-                # can't tell them apart either, so it backs off and retries both.
-                # The outer asyncio.wait_for timeout is what actually bounds the
-                # worst case, so retries here can never turn into a silent hang.
-                client = AsyncOpenAI()
-            started = time.monotonic()
-            response = await client.responses.create(model=selected_model, input=prompt)
-            logger.info("plan call to %s finished in %.1fs", selected_model, time.monotonic() - started)
-            return response.output_text
+            # Shares the pacing gate with the Researcher, so plan and research
+            # calls can never stack up into a burst against the same rate limit.
+            return await llm.respond(stage="plan", model=selected_model, prompt=prompt,
+                                     max_output_tokens=PLAN_MAX_OUTPUT_TOKENS)
         return cls(respond)
 
     async def build_plan(self, profile: RepoProfile, changes: BreakingChanges) -> UpgradePlan:
+        tracer = current_tracer()
+        view = self._planner_view(profile)
+        tracer.write("plan", "input", {"planner_view": view, "changes": changes,
+                                       "live_model": self._responder is not None})
         if self._responder is None:
-            return self._fallback_plan(profile, changes)
+            plan = self._fallback_plan(profile, changes)
+            logger.info("no live planner configured — fallback plan with %d item(s)", len(plan.items))
+            tracer.write("plan", "output", plan, source="fallback")
+            return plan
         prompt = (
             'Return strict JSON, no markdown, matching exactly {"items": [UpgradeItem, ...]} '
             f"where each UpgradeItem has exactly this shape: {UPGRADE_ITEM_SCHEMA}. "
             "Use only these exact field names — do not rename or add fields. "
             "Risk-score and order these upgrades (security first, then patch, minor, major). "
-            f"Profile: {json.dumps(self._planner_view(profile))}; "
+            f"Profile: {json.dumps(view)}; "
             f"changes: {changes.model_dump_json()}"
         )
         last_error: Exception | None = None
+        raw = ""
         for attempt in range(1, 3):
             try:
                 raw = await asyncio.wait_for(self._responder(prompt), timeout=PLAN_TIMEOUT_SECONDS)
                 plan = self._sort(UpgradePlan.model_validate(json.loads(self._json_object(raw))))
-                logger.info("plan built: %d item(s) on attempt %d", len(plan.items), attempt)
+                logger.info("plan built on attempt %d: %d item(s) — %s", attempt, len(plan.items),
+                            [f"{i.dependency} {i.from_version}->{i.to_version} ({i.category.value}, risk {i.risk})"
+                             for i in plan.items])
+                tracer.write("plan", "output", plan, source="model", attempt=attempt)
                 return plan
             except (json.JSONDecodeError, ValueError) as error:
                 logger.warning("plan attempt %d returned invalid JSON: %s", attempt, error)
@@ -81,6 +85,7 @@ class Planner:
                 logger.warning("plan attempt %d timed out after %.0fs", attempt, PLAN_TIMEOUT_SECONDS)
                 last_error = error
                 break
+        tracer.write("plan", "error", {"raw_response": raw, "error": str(last_error)})
         raise ValueError("Planner returned invalid UpgradePlan JSON") from last_error
 
     @staticmethod

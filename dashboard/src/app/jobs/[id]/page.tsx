@@ -11,6 +11,8 @@ import { PlanTable } from "@/components/PlanTable";
 import { ItemCard } from "@/components/ItemCard";
 import { PRPanel } from "@/components/PRPanel";
 import { EventLog } from "@/components/EventLog";
+import { LiveLogPanel } from "@/components/LiveLogPanel";
+import { TraceExplorer } from "@/components/TraceExplorer";
 import { CompletionToast } from "@/components/CompletionToast";
 import { staggerDelay } from "@/lib/motion";
 import type { IterationPayload } from "@/lib/types";
@@ -159,6 +161,8 @@ export default function JobPage() {
       <PRPanel prs={job.prs} />
 
       <EventLog events={events} connected={connected} />
+      <LiveLogPanel jobId={job.id} />
+      <TraceExplorer jobId={job.id} jobState={job.state} />
 
       <CompletionToast job={job} />
     </main>
